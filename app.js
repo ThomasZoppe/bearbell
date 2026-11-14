@@ -85,18 +85,35 @@ const USER_RE = /^[a-z0-9._-]{2,30}$/;
 const cloudUrl = u => '/api/backup?user=' + encodeURIComponent(u);
 const lsGet = k => { try { return localStorage.getItem(KEY + k); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(KEY + k) : localStorage.setItem(KEY + k, v); } catch (e) { /* storage full */ } };
+// true = the online copy is up to date (or there is nothing worth sending).
 async function backup() {
   const u = S.settings.user;
-  if (!u || sending || !navigator.onLine || lsGet('.pending') !== '1' || location.protocol === 'file:') return;
-  if (!S.sessions.length && !S.templates.length && !S.active) return; // a fresh install never replaces a real backup
+  if (!u || lsGet('.pending') !== '1' || location.protocol === 'file:') return true;
+  if (!S.sessions.length && !S.templates.length && !S.active) return true; // a fresh install never replaces a real backup
+  if (sending || !navigator.onLine) return false;
   const r = rev, body = JSON.stringify(S);
+  let ok = false;
   sending = true;
   try {
     // keepalive lets the upload finish while iOS suspends the app, but only for small bodies.
     const res = await fetch(cloudUrl(u), { method: 'PUT', body, headers: { 'content-type': 'application/json' }, keepalive: body.length < 60000 });
-    if (res.ok) { lsSet('.cloudAt', String((await res.json()).savedAt || Date.now())); if (rev === r) lsSet('.pending', null); }
+    if (res.ok) { ok = true; lsSet('.cloudAt', String((await res.json()).savedAt || Date.now())); if (rev === r) lsSet('.pending', null); }
   } catch (e) { /* offline: retry at the next trigger */ }
   sending = false;
+  return ok;
+}
+// Changing user swaps the data on this phone: the old user's data is sent to their backup first,
+// then the new user's backup is loaded (or an empty app if they have none). Never mixes the two.
+async function switchUser(old, u) {
+  let w;
+  try {
+    if (!(await backup())) throw new Error('upload');
+    w = await fetchBackup(u);
+  } catch (e) { return notice(`Serve la connessione per cambiare utente. I dati di "${old}" sono ancora su questo telefono.`); }
+  S = w ? migrate(w.data) : fresh();
+  S.settings.user = u; V.stack = []; V.tab = 'setup';
+  lsSet('.cloudAt', w ? String(w.savedAt) : null); done(); lsSet('.pending', null);
+  notice(w ? `Caricati i dati di "${u}".` : `"${u}" non ha ancora un backup: si parte da zero.`);
 }
 async function fetchBackup(u) {
   const res = await fetch(cloudUrl(u), { cache: 'no-store' });
@@ -1095,11 +1112,18 @@ const ACT = {
   async userSave() {
     const u = (V.tplName || '').trim().toLowerCase();
     if (u && !USER_RE.test(u)) { notice('Da 2 a 30 caratteri: lettere minuscole, numeri, . _ -'); return; }
-    if (u === S.settings.user) return closeSheet();
+    const old = S.settings.user;
+    if (u === old) return closeSheet();
+    if (old && u) {
+      closeSheet();
+      return ask(`Passare all'utente "${u}"?`, `I dati di "${old}" vengono salvati nel suo backup online e tolti da questo telefono. Al loro posto arrivano quelli di "${u}" (vuoti se non ha ancora un backup).`, 'Cambia utente', () => switchUser(old, u));
+    }
+    if (!u) { S.settings.user = ''; lsSet('.cloudAt', null); closeSheet(); return done(); } // backup turned off, data stays
+    // First name on this phone: an existing backup under it is offered before this phone's data replaces it.
+    let w;
+    try { w = await fetchBackup(u); } catch (e) { notice('Serve la connessione per scegliere il nome utente.'); return; }
     S.settings.user = u; lsSet('.cloudAt', null); closeSheet(); done();
-    if (!u) return;
-    // An existing backup under this name: offer it before this phone's data replaces it.
-    try { const w = await fetchBackup(u); if (w) return offerRestore(w); } catch (e) { /* offline or no server */ }
+    if (w) return offerRestore(w);
     backup().then(render);
   },
   async cloudRestore() {
