@@ -1,6 +1,6 @@
 {
-  "name": "Palestra",
-  "short_name": "Palestra",
+  "name": "Bearbell",
+  "short_name": "Bearbell",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

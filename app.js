@@ -1,5 +1,5 @@
 'use strict';
-/* Tracker palestra — un solo file, dati in localStorage; copia di backup su Netlify (/api/backup) per nome utente. */
+/* Bearbell, tracker palestra — un solo file, dati in localStorage; copia di backup su Netlify (/api/backup) per nome utente. */
 
 const DISTRICTS = ['petto', 'dorso', 'spalle', 'bicipiti', 'tricipiti', 'avambracci', 'quadricipiti', 'femorali', 'glutei', 'polpacci', 'addome'];
 const MONTHS = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
@@ -1271,7 +1271,7 @@ const ACT = {
 
   async export() {
     const data = JSON.stringify(S), d = new Date();
-    const name = `palestra-backup-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+    const name = `bearbell-backup-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
     const file = new File([data], name, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === 'AbortError') return; }

@@ -19,7 +19,7 @@ export default async req => {
     if (text.length > 4_000_000) return json({ error: 'backup troppo grande' }, 413);
     let data;
     try { data = JSON.parse(text); } catch { return json({ error: 'JSON non valido' }, 400); }
-    if (!data || !Array.isArray(data.sessions) || !Array.isArray(data.exercises)) return json({ error: 'non è un backup di Palestra' }, 400);
+    if (!data || !Array.isArray(data.sessions) || !Array.isArray(data.exercises)) return json({ error: 'non è un backup di Bearbell' }, 400);
     const savedAt = Date.now();
     await store.setJSON(user, { savedAt, data });
     return json({ savedAt });
