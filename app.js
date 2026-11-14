@@ -1235,9 +1235,10 @@ const ACT = {
     showSheet(() => `<h2>Il tuo nome</h2><p>Per il saluto nella schermata Workout.</p><label class="field"><input data-in="tplName" value="${esc(V.tplName)}" placeholder="Nome" aria-label="Nome" autocapitalize="words"></label><button class="btn primary" data-act="nameSave">Salva</button>`);
   },
   nameSave() { S.settings.name = (V.tplName || '').trim().slice(0, 30); closeSheet(); done(); },
-  editUser() {
+  // welcome = opened at startup because no username is set yet (asked again at every launch until there is one).
+  editUser(welcome) {
     V.tplName = S.settings.user;
-    showSheet(() => `<h2>Nome utente</h2><p>Il backup online viene salvato con questo nome (minuscole, numeri, . _ -). Sul telefono nuovo usa lo stesso nome e tocca Ripristina.</p><label class="field"><input data-in="tplName" value="${esc(V.tplName)}" placeholder="es. marco" aria-label="Nome utente" autocapitalize="none" autocorrect="off" spellcheck="false"></label><button class="btn primary" data-act="userSave">Salva</button>`);
+    showSheet(() => `<h2>${welcome ? 'Benvenuto in Bearbell' : 'Nome utente'}</h2><p>${welcome ? 'Scegli un nome utente: i tuoi dati vengono salvati online con questo nome, così non li perdi se cambi telefono. Se lo hai già usato, scrivi lo stesso nome e tocca Ripristina.' : 'Il backup online viene salvato con questo nome (minuscole, numeri, . _ -). Sul telefono nuovo usa lo stesso nome e tocca Ripristina.'}</p><label class="field"><input data-in="tplName" value="${esc(V.tplName)}" placeholder="es. marco" aria-label="Nome utente" autocapitalize="none" autocorrect="off" spellcheck="false"></label><button class="btn primary" data-act="userSave">${welcome ? 'Continua' : 'Salva'}</button>${welcome ? '<button class="btn" data-act="closeSheet">Più tardi</button>' : ''}`);
   },
   async userSave() {
     const u = (V.tplName || '').trim().toLowerCase();
@@ -1463,6 +1464,7 @@ function selftest() {
     `<div class="set-line"><span class="w" style="font-weight:500;font-size:14px">${esc(n)}</span><span class="p ${ok ? '' : 'bad'}">${ok ? 'ok' : esc(got) + ' ≠ ' + esc(want)}</span></div>`).join('')}</div><button class="btn primary" data-act="closeSheet">Chiudi</button>`);
 }
 if (/[?&]selftest\b/.test(location.search)) setTimeout(selftest);
+else if (!S.settings.user) ACT.editUser('welcome');
 
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
