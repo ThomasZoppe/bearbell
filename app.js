@@ -1063,6 +1063,7 @@ const ACT = {
   session(id) { closeSheet(); V.stack.push({ k: 'session', id }); window.scrollTo(0, 0); render(); },
   exDetail(id) { V.stack.push({ k: 'exercise', id }); window.scrollTo(0, 0); render(); },
   closeSheet,
+  skipSplash() { const el = document.getElementById('splash'); if (el) el.remove(); },
 
   start: id => startSession(id),
   confirm: confirmSet,
@@ -1467,3 +1468,6 @@ if (/[?&]selftest\b/.test(location.search)) setTimeout(selftest);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 render();
+/* Opening animation: drop the splash once its fade-out ends (a tap skips it via data-act) */
+const splashEl = document.getElementById('splash');
+if (splashEl) splashEl.addEventListener('animationend', e => { if (e.target === splashEl) ACT.skipSplash(); });
