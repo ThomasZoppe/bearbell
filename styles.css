@@ -218,7 +218,10 @@ input { -webkit-user-select: text; user-select: text; }
 .cal { display: flex; gap: 3px; }
 .cal .wk { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; max-width: 14px; }
 .cal i { width: 100%; aspect-ratio: 1; border-radius: 4px; background: var(--card2); display: block; }
-.cal i.on { background: var(--green-fill); }
+.cal i.on, .mcal .g i.on, .legend i.nomood { background: var(--green-dim); }
+.cal i.on.bene, .mcal .g i.on.bene, .legend i.bene { background: var(--green-fill); }
+.cal i.on.mid, .mcal .g i.on.mid, .legend i.mid { background: var(--blue-fill); }
+.cal i.on.male, .mcal .g i.on.male, .legend i.male { background: var(--orange-fill); }
 .cal i.fut { background: transparent; box-shadow: inset 0 0 0 1px var(--card2); }
 .cal i.today { box-shadow: 0 0 0 2px var(--card), 0 0 0 3.5px var(--text); }
 .cal-months { position: relative; height: 16px; font-size: 12px; color: var(--muted); font-weight: 600; }
@@ -259,7 +262,6 @@ input { -webkit-user-select: text; user-select: text; }
 .mcal b { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
 .mcal .g { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
 .mcal .g i { aspect-ratio: 1; border-radius: 3px; background: var(--card2); display: block; }
-.mcal .g i.on { background: var(--green-fill); }
 .mcal .g i.x { background: transparent; }
 
 /* Session detail */

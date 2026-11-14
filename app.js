@@ -8,6 +8,9 @@ const DAYS = ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'vene
 const DEFAULTS = { name: '', user: '', exec: 30, bandMin: 10, bandMax: 20, minExtra: 15, maxMin: 15, step: 2.5 };
 const KEY = 'palestra.v1';
 const DAY = 86400000;
+const MOODS = ['bene', 'mid', 'male'];
+const MOOD_L = { bene: 'Bene', mid: 'Mid', male: 'Male' };
+const TEST = 'test'; // demo user: sample data, never uploaded
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -44,7 +47,7 @@ function valid(s) {
   const okItem = i => i && ID(i.exId) && typeof i.sets === 'number' && isFinite(i.sets) && (i.group == null || ID(i.group)) && (i.dropSets == null || (Array.isArray(i.dropSets) && i.dropSets.every(n => typeof n === 'number')));
   const okT = s.templates.every(t => t && ID(t.id) && typeof t.name === 'string' && Array.isArray(t.items) && t.items.every(okItem));
   const okSet = x => x && ID(x.id) && ID(x.exId) && typeof x.ts === 'number' && typeof x.reps === 'number' && isFinite(x.reps) && typeof x.weight === 'number' && isFinite(x.weight) && optNum(x.n) && optNum(x.k);
-  const okS = s.sessions.every(x => x && ID(x.id) && typeof x.start === 'number' && typeof x.name === 'string' && Array.isArray(x.sets) && x.sets.every(okSet) && (x.plan == null || (Array.isArray(x.plan) && x.plan.every(okItem))));
+  const okS = s.sessions.every(x => x && ID(x.id) && typeof x.start === 'number' && typeof x.name === 'string' && Array.isArray(x.sets) && x.sets.every(okSet) && (x.mood == null || MOODS.includes(x.mood)) && (x.plan == null || (Array.isArray(x.plan) && x.plan.every(okItem))));
   const a = s.active;
   const okA = a == null || (ID(a.id) && typeof a.name === 'string' && typeof a.start === 'number' && Array.isArray(a.sets) && a.sets.every(okSet) && Array.isArray(a.plan) && a.plan.every(okItem) && a.entry && ID(a.entry.exId));
   return okEx && okT && okS && okA;
@@ -88,7 +91,7 @@ const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(KEY + k) : l
 // true = the online copy is up to date (or there is nothing worth sending).
 async function backup() {
   const u = S.settings.user;
-  if (!u || lsGet('.pending') !== '1' || location.protocol === 'file:') return true;
+  if (!u || u === TEST || lsGet('.pending') !== '1' || location.protocol === 'file:') return true;
   if (!S.sessions.length && !S.templates.length && !S.active) return true; // a fresh install never replaces a real backup
   if (sending || !navigator.onLine) return false;
   const r = rev, body = JSON.stringify(S);
@@ -108,12 +111,12 @@ async function switchUser(old, u) {
   let w;
   try {
     if (!(await backup())) throw new Error('upload');
-    w = await fetchBackup(u);
+    w = u === TEST ? null : await fetchBackup(u);
   } catch (e) { return notice(`Serve la connessione per cambiare utente. I dati di "${old}" sono ancora su questo telefono.`); }
-  S = w ? migrate(w.data) : fresh();
+  S = w ? migrate(w.data) : u === TEST ? demoData() : fresh();
   S.settings.user = u; V.stack = []; V.tab = 'setup';
   lsSet('.cloudAt', w ? String(w.savedAt) : null); done(); lsSet('.pending', null);
-  notice(w ? `Caricati i dati di "${u}".` : `"${u}" non ha ancora un backup: si parte da zero.`);
+  notice(u === TEST ? 'Utente di prova: dati d\'esempio, mai salvati online.' : w ? `Caricati i dati di "${u}".` : `"${u}" non ha ancora un backup: si parte da zero.`);
 }
 async function fetchBackup(u) {
   const res = await fetch(cloudUrl(u), { cache: 'no-store' });
@@ -134,6 +137,7 @@ function offerRestore(w) {
 }
 function cloudStatus() {
   if (!S.settings.user) return 'Scegli un nome utente per salvare una copia online dei tuoi dati.';
+  if (S.settings.user === TEST) return 'Utente di prova: i dati non vengono salvati online.';
   const t = +lsGet('.cloudAt');
   const last = t ? `Ultimo backup: ${shortDate(t)} alle ${new Date(t).getHours()}:${String(new Date(t).getMinutes()).padStart(2, '0')}` : 'Nessun backup ancora';
   return last + (lsGet('.pending') === '1' ? ' · modifiche da inviare' : '');
@@ -148,6 +152,42 @@ const cur = () => V.stack[V.stack.length - 1];
 const exMap = () => Object.fromEntries(S.exercises.map(e => [e.id, e]));
 const exById = id => S.exercises.find(e => e.id === id) || { id, name: 'Esercizio rimosso', primary: 'petto', secondary: [], bodyweight: false };
 const allSessions = () => S.active && S.active.sets.length ? [...S.sessions, S.active] : S.sessions;
+const setVol = s => s.type === 'warmup' ? 0 : s.weight * s.reps;
+const exVol = (x, exId) => x.sets.reduce((a, s) => a + (s.exId === exId ? setVol(s) : 0), 0);
+function homeStats() {
+  const d = new Date(), a = monthStart(d.getFullYear(), d.getMonth());
+  const ms = S.sessions.filter(x => x.start >= a).reduce((t, x) => t + (x.end || Math.max(x.start, ...x.sets.map(z => z.ts))) - x.start, 0);
+  return { hours: ms / 3600000, vol: S.sessions.reduce((t, x) => t + x.sets.reduce((v, z) => v + setVol(z), 0), 0) };
+}
+// Exercises whose volume beat the previous session that had them.
+function volGains(x) {
+  const prev = S.sessions.filter(p => p.start < x.start).reverse();
+  return [...new Set(x.sets.map(z => z.exId))].map(exId => {
+    const p = prev.find(q => q.sets.some(z => z.exId === exId));
+    return { exId, cur: exVol(x, exId), before: p ? exVol(p, exId) : null };
+  }).filter(o => o.before != null && o.cur > o.before);
+}
+// Sample history for the "test" user: 3 templates, 3 sessions a week for 10 weeks, slowly rising loads.
+function demoData() {
+  const s = fresh(), id = n => s.exercises.find(e => e.name === n).id;
+  const T = [['Push', [['Bench Press', 60], ['Overhead Press', 35], ['Lateral Raise', 8], ['Triceps Pushdown', 25]]],
+    ['Pull', [['Lat Pulldown', 50], ['Barbell Row', 50], ['Face Pull', 20], ['Barbell Curl', 25]]],
+    ['Legs', [['Squat', 80], ['Romanian Deadlift', 70], ['Leg Extension', 40], ['Standing Calf Raise', 60]]]];
+  s.templates = T.map(([name, ex], i) => ({ id: 'demo' + i, name, items: ex.map(([n]) => ({ exId: id(n), sets: 3, group: null, dropSets: [] })) }));
+  let r = 7; const rnd = () => (r = r * 16807 % 2147483647) / 2147483647;
+  for (let w = 9; w >= 0; w--) [0, 2, 4].forEach((d, ti) => {
+    const day = new Date(monday(Date.now()) - w * 7 * DAY + d * DAY + 12 * 3600000); day.setHours(18, 30, 0, 0);
+    if (day.getTime() > Date.now() || rnd() < 0.25) return; // skip ~1 session in 4, like real weeks
+    let ts = day.getTime(); const start = ts, sets = [];
+    T[ti][1].forEach(([n, w0], ei) => {
+      const wt = Math.round(w0 * (1 + (9 - w) * 0.02) / 2.5) * 2.5 || 2.5;
+      for (let k = 1; k <= 3; k++) { ts += (k === 1 ? (ei ? 150 : 0) + 60 : 90 + rnd() * 60) * 1000; sets.push({ id: uid(), exId: id(n), type: 'normal', n: k, k: 0, weight: wt, reps: 11 - k + (rnd() < 0.3 ? 1 : 0), ts }); }
+    });
+    s.sessions.push({ id: uid(), templateId: 'demo' + ti, name: T[ti][0], start, end: ts + 60000, plan: JSON.parse(JSON.stringify(s.templates[ti].items)), sets, mood: MOODS[rnd() < 0.6 ? 0 : rnd() < 0.7 ? 1 : 2] });
+  });
+  s.settings.name = 'Test';
+  return s;
+}
 
 /* ---------- Icone ---------- */
 const svg = (d, w = 20, sw = 2.4, extra = '') => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}${extra}</svg>`;
@@ -358,8 +398,13 @@ function viewStart() {
   const recent = S.sessions.slice(-10).reverse().map(x => `<button class="li" data-act="session" data-arg="${x.id}">
       <span class="grow"><span>${esc(x.name)}</span><span class="sub">${shortDate(x.start)} · ${x.sets.length} serie</span></span>${IC.chevR}</button>`).join('');
   const h = new Date().getHours(), hello = h >= 5 && h < 13 ? 'Buongiorno' : h >= 13 && h < 18 ? 'Ciao' : 'Buonasera';
-  const name = S.settings.name.trim(), showRecent = V.startTab === 'recent';
+  // The greeting falls back to the backup username (the name is per user and starts empty after a switch).
+  const name = cap(S.settings.name.trim() || S.settings.user), showRecent = V.startTab === 'recent', hs = homeStats();
   return `<h1 class="h1">${hello}${name ? ', ' + esc(name) : ''}!</h1>
+    <div class="grid2">
+      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px;color:var(--green)">${fmt1(hs.hours)}</b><span>h</span></div><span class="muted" style="font-size:14px;font-weight:600">ore questo mese</span></div>
+      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px">${Math.round(hs.vol).toLocaleString('it-IT')}</b><span>kg</span></div><span class="muted" style="font-size:14px;font-weight:600">volume totale</span></div>
+    </div>
     <div class="seg" role="radiogroup" aria-label="Mostra" style="grid-template-columns:repeat(2,minmax(0,1fr))">
       <button role="radio" aria-checked="${!showRecent}" data-act="startTab" data-arg="tpl">Scegli la scheda</button>
       <button role="radio" aria-checked="${showRecent}" data-act="startTab" data-arg="recent">Sessioni recenti</button>
@@ -390,7 +435,7 @@ function viewActive() {
       <span class="badge ${lab.ss ? 'ss' : ''}">${lab.t}</span>
       <span class="grow"><span class="name">${esc(ex.name)}</span><span class="dots">${dots}<span class="lbl">${status}</span></span></span>
       ${IC.chevD}</button>`;
-  const since = last ? `<div class="since">${IC.clock}Dalla serie precedente <b data-live="since"></b></div>` : '';
+  const since = restRef() ? `<div class="since">${IC.clock}Dalla serie precedente <b data-live="since"></b></div>` : '';
   const lastTxt = e.ref ? `${fmt(e.ref.weight)} × ${e.ref.reps}` : '—';
   const confirmBtn = `<button class="confirm" data-act="confirm">${IC.check}${e.k > 0 ? 'Conferma drop' : 'Conferma serie'}</button>`;
 
@@ -434,6 +479,11 @@ const bigSize = s => {
   const digits = Math.max(1, s.replace(/[^0-9]/g, '').length), sep = /[,.]/.test(s);
   return `width:${digits + (sep ? 0.45 : 0) + 0.15}ch;--fs:${digits <= 2 ? 1 : digits === 3 ? 0.8 : 0.66}`;
 };
+// Rest counts from the last set only if it was this exercise (or its superset): a new exercise starts with no rest timer.
+function restRef() {
+  const a = A(), s = a.sets[a.sets.length - 1], g = id => (planItem(id) || {}).group;
+  return s && (s.exId === a.entry.exId || (g(s.exId) && g(s.exId) === g(a.entry.exId))) ? s : null;
+}
 const setLabel = s => s.type === 'warmup' ? 'R' + s.n : s.k > 0 ? s.n + '.' + s.k : String(s.n);
 
 function openFinish() {
@@ -464,7 +514,8 @@ function openPicker(mode) {
     }
     return `<h2>${mode === 'workout' ? 'Esercizio' : 'Aggiungi esercizio'}</h2>${top}
       <label class="field">${IC.search}<input type="search" data-in="pq" placeholder="Cerca esercizio" aria-label="Cerca esercizio"></label>
-      <div class="list" id="pick-results">${pickList()}</div>`;
+      <div class="list" id="pick-results">${pickList()}</div>
+      <button class="btn blue-t" data-act="newExPick">${IC.plus}Crea nuovo esercizio</button>`;
   });
 }
 function pickList() {
@@ -501,7 +552,7 @@ function viewSetup() {
     <span class="section-label">Backup online</span>
     <div class="list">
       <button class="li" data-act="editUser"><span class="grow">Nome utente</span><span class="val">${esc(st.user) || 'Scegli'}</span></button>
-      ${st.user ? '<button class="li" data-act="cloudRestore" style="color:var(--blue)"><span class="grow">Ripristina dal backup online</span></button>' : ''}
+      ${st.user && st.user !== TEST ? '<button class="li" data-act="cloudRestore" style="color:var(--blue)"><span class="grow">Ripristina dal backup online</span></button>' : ''}
     </div>
     <p class="muted" style="font-size:13px;margin:8px 16px 0">${esc(cloudStatus())}</p>
     <span class="section-label">Dati</span>
@@ -622,7 +673,10 @@ function viewSession(s) {
     </div>
     <div style="display:flex;gap:8px"><span class="chip-s">Usate ${ps.used}</span><span class="chip-s muted">Escluse ${ps.excl}</span></div>
     ${cards || '<div class="empty">Nessuna serie registrata.</div>'}
-    <p class="muted" style="margin:0 4px;font-size:13px">Tocca una serie per correggerla o eliminarla.</p>`;
+    <p class="muted" style="margin:0 4px;font-size:13px">Tocca una serie per correggerla o eliminarla.</p>
+    ${x === S.active ? '' : `<span class="section-label">Com'è andata?</span>
+    <div class="chips">${MOODS.map(m => `<button class="chip" aria-pressed="${x.mood === m}" data-act="mood" data-arg="${x.id}|${m}">${MOOD_L[m]}</button>`).join('')}</div>
+    <button class="btn danger" style="background:transparent;height:44px" data-act="sessDelete" data-arg="${x.id}">Elimina sessione</button>`}`;
 }
 function openEditSet(id) {
   const sess = [S.active, ...S.sessions].find(x => x && x.sets.some(z => z.id === id));
@@ -645,7 +699,10 @@ function openEditSet(id) {
 
 /* ---------- Grafici ---------- */
 
-function trainedDays() { return new Set(allSessions().map(x => dayKey(x.start))); }
+// dayKey → mood of the day's last session ('' = trained, no mood). Calendars colour the square by it.
+function trainedDays() { return new Map(allSessions().map(x => [dayKey(x.start), x.mood || ''])); }
+const dayCls = (days, k) => days.has(k) ? 'on ' + days.get(k) : '';
+const moodLegend = () => `<div class="legend" style="justify-content:flex-start">${MOODS.map(m => `<span><i class="${m}"></i>${MOOD_L[m]}</span>`).join('')}<span><i class="nomood"></i>Senza umore</span></div>`;
 function monthCounts(n) {
   const now = new Date(), out = [];
   for (let i = n - 1; i >= 0; i--) {
@@ -669,14 +726,14 @@ function calendar(weeks) {
     for (let d = 0; d < 7; d++) {
       const t = new Date(t0 + (w * 7 + d) * DAY + 12 * 3600000); t.setHours(0, 0, 0, 0);
       const ts = t.getTime();
-      const cls = ts > today.getTime() ? 'fut' : (days.has(dayKey(ts)) ? 'on' : '') + (ts === today.getTime() ? ' today' : '');
+      const cls = ts > today.getTime() ? 'fut' : dayCls(days, dayKey(ts)) + (ts === today.getTime() ? ' today' : '');
       cells += `<i class="${cls}"></i>`;
     }
     cols += `<div class="wk">${cells}</div>`;
     const m = new Date(t0 + w * 7 * DAY + 12 * 3600000).getMonth();
     if (m !== prevM) { const left = w / weeks * 100; if (left - lastLeft >= 10) { labels += `<span style="left:${left.toFixed(1)}%">${MONTHS[m]}</span>`; lastLeft = left; } prevM = m; }
   }
-  return `<div style="display:flex;flex-direction:column;gap:6px"><div class="cal-months">${labels}</div><div class="cal" role="img" aria-label="Calendario allenamenti ultime ${weeks} settimane">${cols}</div></div>`;
+  return `<div style="display:flex;flex-direction:column;gap:6px;max-width:${weeks * 17 - 3}px"><div class="cal-months">${labels}</div><div class="cal" role="img" aria-label="Calendario allenamenti ultime ${weeks} settimane">${cols}</div></div>`;
 }
 function monthBars(n) {
   const mc = monthCounts(n), max = Math.max(1, ...mc.map(x => x.c));
@@ -847,6 +904,16 @@ function pauseBars(list, key) {
   return `<div class="pbars" role="img" aria-label="Pausa media per seduta">${vals.map((v, i) => `<div class="${i === vals.length - 1 ? 'last' : ''}" style="height:${v == null ? 2 : Math.round(v / max * 92)}px" title="${v == null ? '—' : mmss(v)}"></div>`).join('')}</div>`;
 }
 
+function openMood(id) {
+  const x = findSession(id), g = volGains(x);
+  showSheet(() => `<h2>Sessione salvata</h2>
+    <span class="lab">Carico aumentato (volume)</span>
+    <div class="list">${g.map(o => `<div class="set-line"><span class="w">${esc(exById(o.exId).name)}</span><span class="p" style="color:var(--green)">+${fmt(Math.round(o.cur - o.before))} kg</span></div>`).join('') || '<div class="empty">Nessun aumento rispetto alla volta precedente.</div>'}</div>
+    <span class="lab">Com'è andata?</span>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">${MOODS.map(m => `<button class="btn" data-act="mood" data-arg="${id}|${m}">${MOOD_L[m]}</button>`).join('')}</div>
+    <button class="btn" style="background:transparent;height:44px" data-act="closeSheet">Salta</button>`);
+}
+
 function viewCharts() {
   const now = new Date(), k = costanzaKpi(), prog = progressData(), ps = pauseSeries(), lastP = ps[ps.length - 1], recent = ps.slice(-12);
   return `<div style="display:flex;flex-direction:column;gap:2px;padding:0 4px 4px"><span class="kicker" style="padding:0">${MONTHS_FULL[now.getMonth()]} ${now.getFullYear()}</span><h1 class="h1" style="margin:0">Grafici</h1></div>
@@ -857,6 +924,7 @@ function viewCharts() {
       <button class="go-btn" data-act="open" data-arg="costanza" aria-label="Dettaglio costanza">${IC.chevR}</button>
     </div>
     ${calendar(18)}
+    ${moodLegend()}
     ${monthBars(6)}
   </section>
 
@@ -888,13 +956,13 @@ function viewCostanza() {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1), y = d.getFullYear(), m = d.getMonth();
     const lead = (d.getDay() + 6) % 7, n = new Date(y, m + 1, 0).getDate();
     let cells = '<i class="x"></i>'.repeat(lead), c = 0;
-    for (let g = 1; g <= n; g++) { const on = days.has(dayKey(new Date(y, m, g).getTime())); c += on; cells += `<i class="${on ? 'on' : ''}"></i>`; }
+    for (let g = 1; g <= n; g++) { const dk = dayKey(new Date(y, m, g).getTime()); c += days.has(dk); cells += `<i class="${dayCls(days, dk)}"></i>`; }
     months += `<div class="mcal"><b>${MONTHS_FULL[m]} ${y !== now.getFullYear() ? y : ''} <span class="muted" style="font-weight:600">· ${c}</span></b><div class="g">${cells}</div></div>`;
   }
   return backBtn('Grafici') + `<h1 class="h1 sm">Costanza</h1>
     <div class="blk"><div style="display:flex;gap:18px"><div class="kpi"><b>${k.c}</b><span>sedute questo mese</span></div></div><div class="kpi"><b style="color:var(--green);font-size:32px">${fmt1(k.avg)}</b><span>sedute a settimana</span></div></div>
     <div class="blk"><span class="blk-title">Sedute per mese</span>${monthBars(12)}</div>
-    <div class="blk"><span class="blk-title">Ultimi 12 mesi</span><div class="months-grid">${months}</div></div>`;
+    <div class="blk"><span class="blk-title">Ultimi 12 mesi</span>${moodLegend()}<div class="months-grid">${months}</div></div>`;
 }
 function viewProgressi() {
   const prog = progressData();
@@ -1003,9 +1071,11 @@ const ACT = {
   },
   finish() {
     const a = A();
-    if (a.sets.length) S.sessions.push({ id: a.id, templateId: a.templateId, name: a.name, start: a.start, end: Date.now(), plan: a.plan, sets: a.sets });
+    const saved = a.sets.length > 0;
+    if (saved) S.sessions.push({ id: a.id, templateId: a.templateId, name: a.name, start: a.start, end: Date.now(), plan: a.plan, sets: a.sets, mood: null });
     S.active = null; V.timerOpen = false; closeSheet(); done();
     backup();
+    if (saved) openMood(a.id);
   },
 
   editSet: id => openEditSet(id),
@@ -1023,6 +1093,12 @@ const ACT = {
     Object.assign(z, { weight: f.weight, reps: f.reps, type: f.type });
     if (sess === S.active && S.active.entry) prepare(S.active.cur, S.active.entry.type);
     closeSheet(); done();
+  },
+  mood(arg) { const [id, m] = arg.split('|'), x = S.sessions.find(q => q.id === id); if (x && MOODS.includes(m)) x.mood = m; closeSheet(); done(); },
+  sessDelete(id) {
+    ask('Eliminare la sessione?', 'Tutte le sue serie verranno cancellate. Non si può annullare.', 'Elimina sessione', () => {
+      S.sessions = S.sessions.filter(x => x.id !== id); V.stack.pop(); done();
+    });
   },
   edDelete() { ask('Eliminare questa serie?', 'Non si può annullare.', 'Elimina serie', ACT.edDeleteYes); },
   edDeleteYes() {
@@ -1078,6 +1154,8 @@ const ACT = {
   },
 
   newEx: () => openExForm(null),
+  // From the picker: the new exercise goes straight into the template / workout being built.
+  newExPick() { const mode = V.pickMode, q = V.pq.trim(); openExForm(null); V.exForm.name = q; V.exForm.addTo = mode; refreshSheet(); },
   editEx: id => openExForm(id),
   exPrim(d) { const f = V.exForm; f.primary = d; f.secondary = f.secondary.filter(x => x !== d); refreshSheet(); },
   exSec(d) { const f = V.exForm; f.secondary = f.secondary.includes(d) ? f.secondary.filter(x => x !== d) : [...f.secondary, d]; refreshSheet(); },
@@ -1087,7 +1165,10 @@ const ACT = {
     if (!name) { notice('Inserisci un nome.'); return; }
     if (S.exercises.some(e => e.id !== f.id && e.name.toLowerCase() === name.toLowerCase())) { notice('Esiste già un esercizio con questo nome.'); return; }
     const data = { name, primary: f.primary, secondary: f.secondary, bodyweight: f.bodyweight };
-    if (f.id) Object.assign(S.exercises.find(e => e.id === f.id), data); else S.exercises.push({ id: uid(), ...data });
+    const id = f.id || uid();
+    if (f.id) Object.assign(S.exercises.find(e => e.id === f.id), data); else S.exercises.push({ id, ...data });
+    if (f.addTo === 'tpl') return ACT.tplAdd(id);
+    if (f.addTo === 'workout') return ACT.pickEx(id);
     closeSheet(); done();
   },
   setting: k => openSetting(k),
@@ -1114,10 +1195,15 @@ const ACT = {
     if (u && !USER_RE.test(u)) { notice('Da 2 a 30 caratteri: lettere minuscole, numeri, . _ -'); return; }
     const old = S.settings.user;
     if (u === old) return closeSheet();
+    if (u === TEST && !old) {
+      if (S.sessions.length || S.templates.length || S.active) { notice('Prima scegli un tuo nome utente, così i tuoi dati restano salvati online.'); return; }
+      closeSheet(); return switchUser('', u);
+    }
     if (old && u) {
       closeSheet();
       return ask(`Passare all'utente "${u}"?`, `I dati di "${old}" vengono salvati nel suo backup online e tolti da questo telefono. Al loro posto arrivano quelli di "${u}" (vuoti se non ha ancora un backup).`, 'Cambia utente', () => switchUser(old, u));
     }
+    if (!u && old === TEST) S = fresh(); // demo data must not end up under a real name later
     if (!u) { S.settings.user = ''; lsSet('.cloudAt', null); closeSheet(); return done(); } // backup turned off, data stays
     // First name on this phone: an existing backup under it is offered before this phone's data replaces it.
     let w;
@@ -1227,7 +1313,7 @@ document.addEventListener('pointercancel', endDrag);
 /* Aggiornamento in tempo reale (indicatore, cronometro, timer) */
 function tick() {
   const a = A(); if (!a) return;
-  const now = Date.now(), last = a.sets[a.sets.length - 1];
+  const now = Date.now(), last = restRef();
   document.querySelectorAll('[data-live]').forEach(el => {
     const k = el.dataset.live;
     if (k === 'since' && last) el.textContent = mmss((now - last.ts) / 1000);
@@ -1270,7 +1356,14 @@ function selftest() {
     const noon = new Date().setHours(12, 0, 0, 0);
     S.active = null; S.sessions = [{ id: 'a', name: 'T', start: noon, sets: [] }, { id: 'b', name: 'T', start: noon + 60000, sets: [] }];
     eq('due sedute stesso giorno = 1', costanzaKpi().c, 1);
+    S.sessions = [{ id: 'a', name: 'T', start: noon, end: noon + 5400000, sets: [{ exId: 'x0', type: 'normal', weight: 60, reps: 8, ts: noon }] },
+      { id: 'b', name: 'T', start: noon + DAY, sets: [{ exId: 'x0', type: 'normal', weight: 62.5, reps: 8, ts: noon + DAY }, { exId: 'x1', type: 'warmup', weight: 40, reps: 10, ts: noon + DAY }] }];
+    eq('aumento volume 60×8 → 62,5×8', volGains(S.sessions[1]).map(o => o.cur - o.before).join(), '20');
+    eq('volume totale senza riscaldamento', homeStats().vol, 980);
+    if (new Date(noon).getMonth() === new Date().getMonth()) eq('ore del mese (fine sessione)', homeStats().hours >= 1.5, true);
+    eq('dati di prova validi', valid(JSON.parse(JSON.stringify(demoData()))), true);
     const good = JSON.parse(JSON.stringify(real));
+    eq('rifiuta umore sconosciuto', valid({ ...good, sessions: [{ id: 'a', name: 'z', start: 1, sets: [], mood: '<b>' }] }), false);
     eq('backup attuale valido', valid(good), true);
     eq('rifiuta distretto con codice', valid({ ...good, exercises: [{ id: 'z', name: 'z', primary: 'petto', secondary: ['<img src=x onerror=alert(1)>'] }] }), false);
     eq('rifiuta id con virgolette', valid({ ...good, templates: [{ id: 'a"b', name: 'z', items: [] }] }), false);
