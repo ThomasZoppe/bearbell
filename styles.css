@@ -4,18 +4,19 @@
   --orange: #FF9F0A; --green: #30D158; --blue: #64D2FF;
   --orange-bg: #3D2A0A; --blue-bg: #0A3A4A; --green-dim: #2C5E3A; --blue-dim: #2A5868; --blue-line: #1F5566;
   --on-accent: #000000;
+  --pink: #FF6FAE;
   --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
   --nav-h: calc(72px + var(--safe-b));
   color-scheme: dark;
 }
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #F2F2F7; --card: #FFFFFF; --card2: #E5E5EA; --card3: #D1D1D6; --sep: #E5E5EA;
-    --text: #000000; --muted: #6C6C70; --muted2: #48484A; --grip: #AEAEB2;
-    --orange: #C25E00; --green: #1F8A3B; --blue: #0071A4;
-    --orange-bg: #FFE9CC; --blue-bg: #D6EEFA; --green-dim: #A9DDB7; --blue-dim: #9CCBE0; --blue-line: #9CCBE0;
-    color-scheme: light;
-  }
+/* The app sets data-theme from the Setup choice (Automatico follows the phone) */
+:root[data-theme="light"] {
+  --bg: #F2F2F7; --card: #FFFFFF; --card2: #E5E5EA; --card3: #D1D1D6; --sep: #E5E5EA;
+  --pink: #C2185B;
+  --text: #000000; --muted: #6C6C70; --muted2: #48484A; --grip: #AEAEB2;
+  --orange: #C25E00; --green: #1F8A3B; --blue: #0071A4;
+  --orange-bg: #FFE9CC; --blue-bg: #D6EEFA; --green-dim: #A9DDB7; --blue-dim: #9CCBE0; --blue-line: #9CCBE0;
+  color-scheme: light;
 }
 /* Fills behind black text stay bright in both themes */
 :root { --orange-fill: #FF9F0A; --green-fill: #30D158; --blue-fill: #64D2FF; }
@@ -133,13 +134,20 @@ input { -webkit-user-select: text; user-select: text; }
 .step-toggle { height: 32px; padding: 0 12px; border-radius: 16px; color: var(--muted); font-size: 13px; font-weight: 600; align-self: center; }
 .step-toggle b { color: var(--text); }
 .last-row { display: flex; align-items: center; justify-content: space-between; padding: 0 6px; }
-.last-row .l { font-size: 14px; color: var(--muted); }
+.last-row .l { font-size: 14px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
 .last-row .l b { color: var(--text); }
 .last-row .pm { display: flex; gap: 4px; align-items: center; }
 .last-row .pm span { font-size: 12px; color: var(--muted); margin-right: 4px; }
 .mini { width: 44px; height: 44px; border-radius: 22px; background: var(--card); color: var(--muted2); font-size: 20px; }
 .confirm { height: 76px; border-radius: 38px; background: var(--orange-fill); color: var(--on-accent); font-size: 21px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 10px; flex-shrink: 0; width: 100%; }
 .confirm.green { background: var(--green-fill); }
+/* New record: a tag pops above the button (it fades out on its own when motion is allowed) */
+.confirm { position: relative; }
+.pr-tag { position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 16px; background: var(--green-fill); color: var(--on-accent); font-size: 15px; white-space: nowrap; pointer-events: none; }
+.trend { display: inline-flex; margin-left: 6px; vertical-align: -1px; }
+.hello .w { display: inline-block; white-space: nowrap; }
+.hello .w > span { display: inline-block; }
+.star { display: inline-flex; color: var(--orange); margin-left: 6px; vertical-align: -1px; }
 .timer-card { flex: 1; min-height: 260px; background: var(--card); border-radius: 34px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px; }
 .timer-card .k { font-size: 13px; font-weight: 700; color: var(--blue); letter-spacing: 1.2px; text-transform: uppercase; }
 .timer-card .v { font-size: 116px; font-weight: 800; letter-spacing: -4px; line-height: 0.9; }
@@ -202,7 +210,7 @@ input { -webkit-user-select: text; user-select: text; }
 .sheet-wrap { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-end; }
 .sheet-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.5); animation: fade .22s ease-out; }
 .sheet { position: relative; width: 100%; max-height: 88dvh; overflow-y: auto; overscroll-behavior: contain; background: var(--bg); border-radius: 28px 28px 0 0; padding: 10px 16px calc(var(--safe-b) + 18px); display: flex; flex-direction: column; gap: 12px; animation: up .22s ease-out; }
-@media (prefers-color-scheme: dark) { .sheet { background: #111113; } }
+:root:not([data-theme="light"]) .sheet { background: #111113; }
 @keyframes up { from { transform: translateY(40px); opacity: 0; } }
 .sheet > * { flex-shrink: 0; }
 .sheet-backdrop { touch-action: none; }
@@ -336,6 +344,17 @@ input { -webkit-user-select: text; user-select: text; }
   #app.flash .confirm svg { animation: chip .45s cubic-bezier(.3, 1.6, .5, 1) both; }
   @keyframes roll { from { opacity: 0; transform: translateY(55%) scale(.9); filter: blur(6px); } 60% { filter: blur(0); } }
   @keyframes chip { from { opacity: 0; transform: scale(.4); } }
+  /* Start screen: switching "Scegli la scheda" / "Sessioni recenti" animates only the list under the switch */
+  #app.swap > .seg ~ * { animation: rise .3s ease-out both; }
+  /* Greeting letters rise in once the splash is gone (the class "go" is added then) */
+  .hello.go .w > span { animation: hello-in .35s ease-out both; animation-delay: calc(var(--i) * 30ms); }
+  .hello.go .w > .n { animation: hello-in .35s ease-out both, hello-name .7s ease-in-out both; animation-delay: calc(var(--i) * 30ms), calc(.25s + var(--i) * 45ms); }
+  @keyframes hello-in { from { opacity: 0; transform: translateX(-10px); } }
+  @keyframes hello-name { 0%, 100% { color: var(--text); } 40% { color: var(--orange); } }
+  .confirm.pr { animation: pr-blink .28s ease-in-out 4 alternate; }
+  .pr-tag { animation: pr-tag 2.2s ease-out forwards; }
+  @keyframes pr-blink { to { background: var(--green-fill); } }
+  @keyframes pr-tag { from { opacity: 0; transform: translate(-50%, 10px) scale(.8); } 12%, 80% { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, 0); } }
   /* Calendar squares pop in column by column; sparklines draw left to right */
   #app.anim .cal i { animation: cell .3s calc(.12s + var(--d, 0) * 16ms) cubic-bezier(.3, 1.4, .5, 1) both; }
   @keyframes cell { from { transform: scale(0); opacity: 0; } }

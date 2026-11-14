@@ -5,7 +5,8 @@ const DISTRICTS = ['petto', 'dorso', 'spalle', 'bicipiti', 'tricipiti', 'avambra
 const MONTHS = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
 const MONTHS_FULL = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
 const DAYS = ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato'];
-const DEFAULTS = { name: '', user: '', exec: 30, bandMin: 10, bandMax: 20, minExtra: 15, maxMin: 15, step: 2.5, ding: true, rest: 90 };
+const DEFAULTS = { name: '', user: '', exec: 30, bandMin: 10, bandMax: 20, minExtra: 15, maxMin: 15, step: 2.5, ding: true, rest: 90, theme: 'auto', weekGoal: 3, trendTol: 2 };
+const THEMES = [['auto', 'Automatico'], ['light', 'Chiaro'], ['dark', 'Scuro']];
 const KEY = 'palestra.v1';
 const DAY = 86400000;
 const MOODS = ['bene', 'mid', 'male'];
@@ -63,6 +64,7 @@ function migrate(s) {
     const v = s.settings[k];
     if (typeof v !== typeof DEFAULTS[k] || (typeof v === 'number' && !isFinite(v))) s.settings[k] = DEFAULTS[k];
   }
+  if (!THEMES.some(t => t[0] === s.settings.theme)) s.settings.theme = 'auto';
   // New library exercises reach existing installs; the ones already saved keep the user's edits, deleted ones stay deleted.
   s.removed = s.removed || [];
   const have = new Set([...s.exercises.map(e => e.name.toLowerCase()), ...s.removed]);
@@ -88,7 +90,7 @@ function save() {
 
 /* ---------- Backup cloud ---------- */
 // Only the last copy per user is kept on the server. Sent only when something is stored for good:
-// a finished workout (and its mood), a new or edited exercise, a deleted workout, a user switch.
+// a finished workout (and its mood), a new or edited exercise, a deleted workout, a user switch, a tap on "Invia online".
 // Other changes stay local and travel with the next of these.
 let rev = 0, sending = false;
 const USER_RE = /^[a-z0-9._-]{2,30}$/;
@@ -169,6 +171,50 @@ function homeStats() {
   const ms = S.sessions.filter(x => x.start >= a).reduce((t, x) => t + (x.end || Math.max(x.start, ...x.sets.map(z => z.ts))) - x.start, 0);
   return { hours: ms / 3600000, vol: S.sessions.reduce((t, x) => t + x.sets.reduce((v, z) => v + setVol(z), 0), 0) };
 }
+// Estimated 1RM (Epley) of one set; 0 = doesn't count (warm-up, over 12 reps, no weight).
+const epley = s => s.type !== 'warmup' && s.reps > 0 && s.reps <= 12 && s.weight > 0 ? s.weight * (1 + s.reps / 30) : 0;
+const bestE1 = (exId, list) => list.reduce((m, x) => x.sets.reduce((b, s) => s.exId === exId ? Math.max(b, epley(s)) : b, m), 0);
+// Sessions with a record: an exercise's best 1RM beat every earlier session (a first time doesn't count).
+function prSessions() {
+  const best = {}, out = new Set();
+  allSessions().forEach(x => {
+    const top = {};
+    x.sets.forEach(s => { top[s.exId] = Math.max(top[s.exId] || 0, epley(s)); });
+    for (const id in top) { if (best[id] && top[id] > best[id] + 1e-9) out.add(x.id); best[id] = Math.max(best[id] || 0, top[id]); }
+  });
+  return out;
+}
+// Trend of an exercise from its best 1RM per session (oldest first): the top set, so warm-ups and back-off sets don't count.
+// up = latest clearly above 2 sessions ago; down = the last 2 both clearly below (one bad day isn't a trend);
+// plateau = no clear gain over the last 5; null = fewer than 3 sessions. "Clearly" = beyond ±trendTol %.
+function trend(v) {
+  const n = v.length; if (n < 3) return null;
+  const tol = S.settings.trendTol / 100, [a, b, c] = v.slice(-3);
+  if (c > a * (1 + tol) && c >= b * (1 - tol)) return 'up';
+  if (b < a * (1 - tol) && c < a * (1 - tol)) return 'down';
+  if (n >= 5 && Math.max(...v.slice(-4)) <= v[n - 5] * (1 + tol)) return 'plateau';
+  return 'flat';
+}
+// Length of the plateau: sessions since the last one that the rest never clearly beat (5 or more when trend() says plateau).
+function plateauLen(v) {
+  const tol = S.settings.trendTol / 100;
+  let s = v.length - 4; // the plateau window is v[s - 1 ..]: v[s - 1] is the reference
+  while (s > 1 && Math.max(...v.slice(s - 1)) <= v[s - 2] * (1 + tol)) s--;
+  return v.length - s + 1;
+}
+const exposures = exId => S.sessions.map(x => bestE1(exId, [x])).filter(v => v > 0); // finished sessions only
+const TREND = { up: ['M12 19V5M6 11l6-6 6 6', 'var(--green)', 'in progressione'], down: ['M12 5v14M6 13l6 6 6-6', 'var(--orange)', 'in calo'],
+  flat: ['M6 12h12', 'var(--muted)', 'stabile'], plateau: ['M6 9h12M6 15h12', 'var(--pink)', 'possibile plateau'] };
+const trendTag = t => t ? `<span class="trend" style="color:${TREND[t][1]}" role="img" aria-label="${TREND[t][2]}">${svg(`<path d="${TREND[t][0]}"/>`, 14, 3)}</span>` : '';
+// Weeks in a row with at least weekGoal training days. The current week counts once reached and never breaks the streak.
+function streak() {
+  const goal = Math.max(1, S.settings.weekGoal), per = {};
+  allSessions().forEach(x => { const w = monday(x.start); (per[w] = per[w] || new Set()).add(dayKey(x.start)); });
+  const met = w => (per[w] ? per[w].size : 0) >= goal;
+  let w = monday(Date.now()), n = met(w) ? 1 : 0;
+  for (w = monday(w - DAY); met(w); w = monday(w - DAY)) n++; // monday(w - DAY) = previous Monday, safe across DST
+  return n;
+}
 // Exercises whose volume beat the previous session that had them.
 function volGains(x) {
   const prev = S.sessions.filter(p => p.start < x.start).reverse();
@@ -217,8 +263,11 @@ const IC = {
   search: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
   grip: '<svg width="22" height="22" viewBox="0 0 24 24" fill="var(--grip)" aria-hidden="true"><circle cx="9" cy="7" r="1.6"/><circle cx="15" cy="7" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="17" r="1.6"/><circle cx="15" cy="17" r="1.6"/></svg>',
   export: svg('<path d="M12 15V3M7 8l5-5 5 5M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>', 20, 2.2),
+  star: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg>',
   import: svg('<path d="M12 3v12M7 10l5 5 5-5M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>', 20, 2.2),
 };
+
+const starTag = `<span class="star" role="img" aria-label="record">${IC.star}</span>`;
 
 /* ---------- Schede: superset e etichette ---------- */
 
@@ -306,9 +355,11 @@ function confirmSet() {
   const a = A(), e = a.entry;
   if (!(e.reps > 0)) { notice('Inserisci almeno 1 ripetizione.'); return; }
   if (S.settings.ding) audio();
-  const now = Date.now(), prev = a.sets[a.sets.length - 1];
   V.flash = true; // "Conferma" rolls the new numbers in (#app.flash in the CSS)
-  a.sets.push({ id: uid(), exId: e.exId, n: e.n, k: e.k, type: e.type, reps: e.reps, weight: e.weight, ts: now, gap: prev ? Math.round((now - prev.ts) / 1000) : null });
+  // Record: beats every earlier session and today's sets so far (an exercise done for the first time doesn't count).
+  const v = epley(e), hist = bestE1(e.exId, S.sessions);
+  V.pr = hist > 0 && v > Math.max(hist, bestE1(e.exId, [a])) + 1e-9;
+  a.sets.push({ id: uid(), exId: e.exId, n: e.n, k: e.k, type: e.type, reps: e.reps, weight: e.weight, ts: Date.now() });
   if (e.type === 'drop') { a.drop = { exId: e.exId, n: e.n, k: e.k + 1 }; prepare(e.exId, 'drop'); return done(); }
   advance(e.exId, e.type);
 }
@@ -357,7 +408,7 @@ let lastView = null, lastDepth = 0;
 function render() {
   const app = $('#app'), s = cur();
   // Animate only when the screen changes (not on every ± tap): forward = push, back = pop, otherwise fade up.
-  const view = [V.tab, V.stack.map(x => x.k + (x.id || '')).join('/'), A() ? 'active' : '', V.timerOpen, V.startTab].join('|');
+  const view = [V.tab, V.stack.map(x => x.k + (x.id || '')).join('/'), A() ? 'active' : '', V.timerOpen].join('|');
   const depth = V.stack.length;
   const anim = lastView === null || view === lastView ? '' : depth > lastDepth ? 'anim push' : depth < lastDepth ? 'anim pop' : 'anim';
   lastView = view; lastDepth = depth;
@@ -367,11 +418,12 @@ function render() {
   else if (V.tab === 'workout') html = A() ? viewActive() : viewStart();
   else if (V.tab === 'setup') html = viewSetup();
   else html = viewCharts();
-  app.className = (!s && V.tab === 'workout' && A() ? 'fit ' : '') + anim + (V.flash ? ' flash' : '');
-  V.flash = false; // one-shot: the next render (e.g. a ± tap) drops the class
+  app.className = (!s && V.tab === 'workout' && A() ? 'fit ' : '') + anim + (V.flash ? ' flash' : '') + (V.swap ? ' swap' : '');
+  V.flash = V.pr = V.swap = false; // one-shot: the next render (e.g. a ± tap) drops the classes and the record tag
   app.innerHTML = html;
   placeSegs(segs);
   renderNav();
+  applyTheme();
   tick();
   if (V.finish) { V.finish = false; openFinish(); }
 }
@@ -392,6 +444,14 @@ function placeSegs(prev) {
     put(to);
   });
 }
+// Light/dark from the Setup choice; "auto" follows the phone and updates when the phone switches.
+const darkMQ = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  const t = S.settings.theme, dark = t === 'auto' ? darkMQ.matches : t === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m => { m.content = dark ? '#000000' : '#F2F2F7'; });
+}
+darkMQ.addEventListener('change', applyTheme);
 const TABS = [['workout', 'Workout', IC.workout], ['setup', 'Setup', IC.setup], ['grafici', 'Grafici', IC.chart]];
 // Built once and then only updated, so the oval can slide between tabs.
 function renderNav() {
@@ -401,7 +461,9 @@ function renderNav() {
   nav.dataset.tab = V.tab;
   nav.style.setProperty('--i', TABS.findIndex(t => t[0] === V.tab));
 }
-const backBtn = label => `<div class="row-between"><button class="back" data-act="back">${IC.back}${esc(label)}</button></div>`;
+// Big number card (value, label below); val and label are built by the app, never user text.
+const kpiCard = (val, label, color = '', unit = '') => `<div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px${color ? ';color:' + color : ''}">${val}</b>${unit ? `<span>${unit}</span>` : ''}</div><span class="muted" style="font-size:14px;font-weight:600">${label}</span></div>`;
+const backBtn = label =>`<div class="row-between"><button class="back" data-act="back">${IC.back}${esc(label)}</button></div>`;
 function done() { save(); render(); }
 
 /* Workout — scelta scheda */
@@ -409,15 +471,21 @@ function viewStart() {
   const t = S.templates.map(t => `<button class="tpl-card" data-act="start" data-arg="${t.id}">
       <span class="grow"><span class="name">${esc(t.name)}</span><span class="muted" style="font-size:14px">${tplSummary(t)}</span></span>
       <span class="go">Inizia</span></button>`).join('');
+  const prs = V.startTab === 'recent' ? prSessions() : new Set();
   const recent = S.sessions.slice(-10).reverse().map(x => `<button class="li" data-act="session" data-arg="${x.id}">
-      <span class="grow"><span>${esc(x.name)}</span><span class="sub">${shortDate(x.start)} · ${x.sets.length} serie</span></span>${IC.chevR}</button>`).join('');
+      <span class="grow"><span>${esc(x.name)}${prs.has(x.id) ? starTag : ''}</span><span class="sub">${shortDate(x.start)} · ${x.sets.length} serie</span></span>${IC.chevR}</button>`).join('');
   const h = new Date().getHours(), hello = h >= 5 && h < 13 ? 'Buongiorno' : h >= 13 && h < 18 ? 'Ciao' : 'Buonasera';
   // The greeting falls back to the backup username (the name is per user and starts empty after a switch).
   const name = cap(S.settings.name.trim() || S.settings.user), showRecent = V.startTab === 'recent', hs = homeStats();
-  return `<h1 class="h1">${hello}${name ? ', ' + esc(name) : ''}!</h1>
+  // One span per letter (grouped by word so it wraps between words): the letters rise in when the splash ends.
+  const hi = hello + (name ? ', ' + name : '') + '!';
+  let li = 0;
+  // Words after the greeting are the name (class n: it lights up orange letter by letter); the final "!" is not.
+  const letters = hi.split(' ').map((w, wi) => `<span class="w">${[...w].map(c => `<span${wi && c !== '!' ? ' class="n"' : ''} style="--i:${li++}">${esc(c)}</span>`).join('')}</span>`).join(' ');
+  return `<h1 class="h1 hello" aria-label="${esc(hi)}"><span aria-hidden="true">${letters}</span></h1>
     <div class="grid2">
-      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px;color:var(--green)">${fmt1(hs.hours)}</b><span>h</span></div><span class="muted" style="font-size:14px;font-weight:600">ore questo mese</span></div>
-      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px">${Math.round(hs.vol).toLocaleString('it-IT')}</b><span>kg</span></div><span class="muted" style="font-size:14px;font-weight:600">volume totale</span></div>
+      ${kpiCard(fmt1(hs.hours), 'ore questo mese', 'var(--green)', 'h')}
+      ${kpiCard(Math.round(hs.vol).toLocaleString('it-IT'), 'volume totale', '', 'kg')}
     </div>
     <div class="seg" role="radiogroup" aria-label="Mostra" style="grid-template-columns:repeat(2,minmax(0,1fr))">
       <button role="radio" aria-checked="${!showRecent}" data-act="startTab" data-arg="tpl">Scegli la scheda</button>
@@ -440,18 +508,19 @@ function viewActive() {
   const status = e.type === 'warmup' ? `Riscaldamento ${e.n}` : e.k > 0 ? `Serie ${e.n} · drop ${e.k}` : e.n <= pl ? `Serie ${e.n} di ${pl}` : `Serie ${e.n} · extra`;
   const t = a.timer;
   const head = `<div class="w-head">
-      <div class="t"><span class="n">${esc(a.name)}</span><span class="clock" data-live="clock"></span></div>
+      <div class="t"><span class="n">${esc(a.name)}${prSessions().has(a.id) ? starTag : ''}</span><span class="clock" data-live="clock"></span></div>
       <div class="acts">
         <button class="pill blue" data-act="timerOpen" aria-label="${V.timerOpen ? 'Chiudi' : 'Apri'} timer pausa">${V.timerOpen ? IC.up + 'Riduci' : IC.timer + `<span data-live="tpill">Pausa</span>`}</button>
         ${V.timerOpen ? '' : `<button class="pill" data-act="finishAsk">Fine</button>`}
       </div></div>
     <div class="ex-wrap"><button class="ex-card ${V.exMenu ? 'open' : ''}" data-act="picker" aria-label="Cambia esercizio" aria-expanded="${!!V.exMenu}">
       <span class="badge ${lab.ss ? 'ss' : ''}">${lab.t}</span>
-      <span class="grow"><span class="name">${esc(ex.name)}</span><span class="dots">${dots}<span class="lbl">${status}</span></span></span>
+      <span class="grow"><span class="name">${esc(ex.name)}${trendTag(trend(exposures(e.exId)))}</span><span class="dots">${dots}<span class="lbl">${status}</span></span></span>
       ${IC.chevD}</button>${V.exMenu ? exMenu() : ''}</div>`;
   const since = restRef() ? `<div class="since">${IC.clock}Dalla serie precedente <b data-live="since"></b></div>` : '';
   const lastTxt = e.ref ? `${fmt(e.ref.weight)} × ${e.ref.reps}` : '—';
-  const confirmBtn = `<button class="confirm" data-act="confirm">${IC.check}${e.k > 0 ? 'Conferma drop' : 'Conferma serie'}</button>`;
+  const prTag = V.pr ? `<span class="pr-tag">${IC.star}Nuovo record</span>` : '';
+  const confirmBtn = `<button class="confirm${V.pr ? ' pr' : ''}" data-act="confirm">${prTag}${IC.check}${e.k > 0 ? 'Conferma drop' : 'Conferma serie'}</button>`;
 
   if (V.timerOpen) {
     return head + `<div class="timer-card">
@@ -484,7 +553,7 @@ function viewActive() {
       <label class="big"><input data-in="reps" inputmode="numeric" value="${e.reps}" style="${bigSize(String(e.reps))}" aria-label="Ripetizioni"><span class="u">rep</span></label>
       <button class="rb" data-act="r" data-arg="1" aria-label="Aumenta ripetizioni">+</button>
     </div></div>
-    <div class="last-row"><span class="l">Ultima volta <b>${lastTxt}</b></span>
+    <div class="last-row">${lastSessionSets(e.exId).length ? `<button class="l" data-act="history" data-arg="${e.exId}" aria-label="Ultime sedute di ${esc(ex.name)}">Ultima volta <b>${lastTxt}</b>${IC.chevR}</button>` : `<span class="l">Ultima volta <b>${lastTxt}</b></span>`}
       <span class="pm"><span>serie</span><button class="mini" data-act="setsAdj" data-arg="-1" aria-label="Togli serie">−</button><button class="mini" data-act="setsAdj" data-arg="1" aria-label="Aggiungi serie">+</button></span></div>
     ${confirmBtn}`;
 }
@@ -559,14 +628,21 @@ function viewSetup() {
       <button class="li" data-act="editName"><span class="grow">Nome</span><span class="val">${esc(st.name) || 'Aggiungi'}</span></button>
       <button class="li" data-act="setting" data-arg="rest"><span class="grow">Avviso fine pausa</span><span class="val">${st.ding ? mmss(st.rest) + ' + ' + st.exec + ' s' : 'No'}</span></button>
       <button class="li" data-act="setting" data-arg="exec"><span class="grow">Durata di una serie</span><span class="val">${st.exec} s</span></button>
+      <button class="li" data-act="setting" data-arg="goal"><span class="grow">Obiettivo a settimana</span><span class="val">${st.weekGoal} ${st.weekGoal === 1 ? 'giorno' : 'giorni'}</span></button>
+      <button class="li" data-act="setting" data-arg="tol"><span class="grow">Soglia progressi</span><span class="val">±${fmt(st.trendTol)}%</span></button>
       <button class="li" data-act="setting" data-arg="band"><span class="grow">Serie a settimana</span><span class="val">${st.bandMin} – ${st.bandMax}</span></button>
       <button class="li" data-act="setting" data-arg="minPause"><span class="grow">Pausa minima valida</span><span class="val">${st.exec + st.minExtra} s</span></button>
       <button class="li" data-act="setting" data-arg="maxPause"><span class="grow">Pausa massima valida</span><span class="val">${st.maxMin} min</span></button>
     </div>
+    <span class="section-label">Aspetto</span>
+    <div class="seg" role="radiogroup" aria-label="Aspetto" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      ${THEMES.map(([k, l]) => `<button role="radio" aria-checked="${st.theme === k}" data-act="theme" data-arg="${k}">${l}</button>`).join('')}
+    </div>
     <span class="section-label">Backup online</span>
     <div class="list">
       <button class="li" data-act="editUser"><span class="grow">Nome utente</span><span class="val">${esc(st.user) || 'Scegli'}</span></button>
-      ${st.user && st.user !== TEST ? '<button class="li" data-act="cloudRestore" style="color:var(--blue)"><span class="grow">Ripristina dal backup online</span></button>' : ''}
+      ${st.user && st.user !== TEST ? `<button class="li" data-act="cloudRestore" style="color:var(--blue)"><span class="grow">Ripristina dal backup online</span></button>
+      <button class="li" data-act="cloudSend" style="color:var(--blue)"><span class="grow">Invia online</span></button>` : ''}
     </div>
     <p class="muted" style="font-size:13px;margin:8px 16px 0">${esc(cloudStatus())}</p>
     <span class="section-label">Dati</span>
@@ -606,6 +682,8 @@ function openSetting(key) {
   showSheet(() => {
     const st = S.settings;
     const row = (k, v, unit) => `<div class="set-steprow"><button class="rb" data-act="setAdj" data-arg="${k}|-1" aria-label="Diminuisci">−</button><b>${v} <span class="muted" style="font-size:18px">${unit}</span></b><button class="rb" data-act="setAdj" data-arg="${k}|1" aria-label="Aumenta">+</button></div>`;
+    if (key === 'tol') return `<h2>Soglia progressi</h2><p>Variazione del 1RM stimato sotto cui un esercizio resta "stabile". Più bassa = frecce più sensibili, più alta = meno falsi allarmi.</p>${row('trendTol', '±' + fmt(st.trendTol), '%')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
+    if (key === 'goal') return `<h2>Obiettivo a settimana</h2><p>Giorni di allenamento a settimana per tenere la serie di settimane di fila. La settimana in corso conta appena lo raggiungi.</p>${row('weekGoal', st.weekGoal, 'giorni')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
     if (key === 'exec') return `<h2>Durata di una serie</h2><p>Tempo di esecuzione sottratto all'intervallo tra due conferme per calcolare la pausa.</p>${row('exec', st.exec, 's')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
     if (key === 'band') return `<h2>Serie a settimana</h2><p>Fascia di riferimento per distretto: sotto = carente, sopra = alto.</p><span class="lab">Minimo</span>${row('bandMin', st.bandMin, 'serie')}<span class="lab">Massimo</span>${row('bandMax', st.bandMax, 'serie')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
     if (key === 'minPause') return `<h2>Pausa minima valida</h2><p>Se tra due conferme passa meno di questo tempo la pausa è "non attendibile". Predefinito: durata serie + 15 s.</p>${row('minExtra', st.exec + st.minExtra, 's')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
@@ -616,7 +694,7 @@ function openSetting(key) {
     return `<h2>Pausa massima valida</h2><p>Pause più lunghe vengono escluse dalle medie.</p>${row('maxMin', st.maxMin, 'min')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
   });
 }
-const SET_RULES = { rest: [15, 15, 600], exec: [5, 5, 300], bandMin: [1, 1, 60], bandMax: [1, 1, 80], minExtra: [5, 0, 600], maxMin: [1, 1, 120] };
+const SET_RULES = { trendTol: [0.5, 0.5, 5], weekGoal: [1, 1, 7], rest: [15, 15, 600], exec: [5, 5, 300], bandMin: [1, 1, 60], bandMax: [1, 1, 80], minExtra: [5, 0, 600], maxMin: [1, 1, 120] };
 
 /* Scheda editor */
 function viewScheda(s) {
@@ -647,7 +725,7 @@ function viewScheda(s) {
     ${sel ? '<p class="muted" style="margin:0 4px">Seleziona gli esercizi da raggruppare in superset.</p>' : ''}
     ${html || '<div class="empty">Scheda vuota. Aggiungi il primo esercizio.</div>'}
     <div class="spacer"></div>${bottom}
-    ${sel ? '' : '<button class="btn danger" style="background:transparent;height:44px" data-act="tplDelete">Elimina scheda</button>'}`;
+    ${sel ? '' : '<button class="btn blue-t" data-act="tplDuplicate">Duplica scheda</button><button class="btn danger" style="background:transparent;height:44px" data-act="tplDelete">Elimina scheda</button>'}`;
 }
 const curTpl = () => S.templates.find(x => x.id === cur().id);
 
@@ -685,10 +763,10 @@ function viewSession(s) {
     return `<div class="list"><div class="ex-head"><b>${esc(exById(exId).name)}</b><span>pausa media ${avg}</span></div>${lines}</div>`;
   }).join('');
   return backBtn('Indietro') + `<span class="kicker">${cap(longDate(x.start))} · ${Math.round(dur)} min</span>
-    <h1 class="h1 sm">${esc(x.name)}</h1>
+    <h1 class="h1 sm">${esc(x.name)}${prSessions().has(x.id) ? starTag : ''}</h1>
     <div class="grid2">
-      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px;color:var(--blue)">${ps.avgSet == null ? '—' : mmss(ps.avgSet)}</b></div><span class="muted" style="font-size:14px;font-weight:600">tra serie</span></div>
-      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px">${ps.avgEx == null ? '—' : mmss(ps.avgEx)}</b></div><span class="muted" style="font-size:14px;font-weight:600">tra esercizi</span></div>
+      ${kpiCard(ps.avgSet == null ? '—' : mmss(ps.avgSet), 'tra serie', 'var(--blue)')}
+      ${kpiCard(ps.avgEx == null ? '—' : mmss(ps.avgEx), 'tra esercizi')}
     </div>
     <div style="display:flex;gap:8px"><span class="chip-s">Usate ${ps.used}</span><span class="chip-s muted">Escluse ${ps.excl}</span></div>
     ${cards || '<div class="empty">Nessuna serie registrata.</div>'}
@@ -696,6 +774,15 @@ function viewSession(s) {
     ${x === S.active ? '' : `<span class="section-label">Com'è andata?</span>
     <div class="moods">${MOODS.map(m => `<button class="mood-btn ${m}" aria-pressed="${x.mood === m}" data-act="mood" data-arg="${x.id}|${m}" aria-label="${MOOD_L[m]}"></button>`).join('')}</div>
     <button class="btn danger" style="background:transparent;height:44px" data-act="sessDelete" data-arg="${x.id}">Elimina sessione</button>`}`;
+}
+// Last n finished sessions of one exercise, newest first, every set (warm-ups and drops included), in the session-detail style.
+function exHistory(exId, n) {
+  const list = S.sessions.filter(x => x.sets.some(z => z.exId === exId)).slice(-n).reverse();
+  return list.map(x => {
+    const d = new Date(x.start), sets = x.sets.filter(z => z.exId === exId).sort((a, b) => a.ts - b.ts);
+    const lines = sets.map(z => `<div class="set-line"><span class="i">${setLabel(z)}</span><span class="w">${fmt(z.weight)} kg × ${z.reps}${z.type === 'warmup' ? '<span class="tag warm">R</span>' : z.type === 'drop' ? '<span class="tag drop">DROP</span>' : ''}</span></div>`).join('');
+    return `<div class="list"><div class="ex-head"><b>${cap(DAYS[d.getDay()].slice(0, 3))} ${shortDate(x.start)}</b><span class="muted" style="font-size:14px">${esc(x.name)}</span></div>${lines}</div>`;
+  }).join('') || '<div class="empty">Nessuna seduta registrata.</div>';
 }
 function openEditSet(id) {
   const sess = [S.active, ...S.sessions].find(x => x && x.sets.some(z => z.id === id));
@@ -720,6 +807,7 @@ function openEditSet(id) {
 
 // dayKey → mood of the day's last session ('' = trained, no mood). Calendars colour the square by it.
 function trainedDays() { return new Map(allSessions().map(x => [dayKey(x.start), x.mood || ''])); }
+const MOOD_FILL = { bene: 'var(--green-fill)', mid: 'var(--blue-fill)', male: 'var(--orange-fill)' }; // same colours as the calendar
 const dayCls = (days, k) => days.has(k) ? 'on ' + days.get(k) : '';
 const moodLegend = () => `<div class="legend" style="justify-content:flex-start">${MOODS.map(m => `<span><i class="${m}"></i>${MOOD_L[m]}</span>`).join('')}<span><i class="nomood"></i>Senza umore</span></div>`;
 function monthCounts(n) {
@@ -767,9 +855,9 @@ function progressData() {
       if (s.type === 'warmup') return;
       const o = by[s.exId] || (by[s.exId] = { e1: 0, vol: 0 });
       o.vol += s.weight * s.reps;
-      if (s.reps > 0 && s.reps <= 12 && s.weight > 0) o.e1 = Math.max(o.e1, s.weight * (1 + s.reps / 30));
+      o.e1 = Math.max(o.e1, epley(s));
     });
-    Object.entries(by).forEach(([id, o]) => (per[id] = per[id] || []).push({ t: x.start, e1: o.e1, vol: o.vol }));
+    Object.entries(by).forEach(([id, o]) => (per[id] = per[id] || []).push({ t: x.start, e1: o.e1, vol: o.vol, mood: x.mood }));
   });
   return Object.entries(per).map(([id, pts]) => {
     const e = pts.filter(p => p.e1 > 0);
@@ -787,9 +875,20 @@ function spark(vals, color) {
   return `<svg class="spark" width="72" height="28" viewBox="0 0 72 28" aria-hidden="true"><polyline pathLength="1" points="${pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${l[0]}" cy="${l[1]}" r="3" fill="${color}"/></svg>`;
 }
 const progToggle = () => `<div class="seg sm" role="radiogroup" aria-label="Metrica" style="display:inline-flex">
-  <button role="radio" aria-checked="${V.prog !== 'vol'}" data-act="prog" data-arg="e1">1RM stimato</button>
-  <button role="radio" aria-checked="${V.prog === 'vol'}" data-act="prog" data-arg="vol">Volume</button></div>`;
+  <button role="radio" aria-checked="${V.prog !== 'vol' && V.prog !== 'plateau'}" data-act="prog" data-arg="e1">1RM stimato</button>
+  <button role="radio" aria-checked="${V.prog === 'vol'}" data-act="prog" data-arg="vol">Volume</button>
+  <button role="radio" aria-checked="${V.prog === 'plateau'}" data-act="prog" data-arg="plateau">Plateau</button></div>`;
+// "Plateau" shows only the exercises in plateau, longest first; the other modes show them all.
+function progList() {
+  const prog = progressData();
+  if (V.prog !== 'plateau') return prog;
+  return prog.filter(p => trend(p.e.map(x => x.e1)) === 'plateau').map(p => ({ ...p, plat: plateauLen(p.e.map(x => x.e1)) })).sort((a, b) => b.plat - a.plat);
+}
 function progRow(p) {
+  if (p.plat) { // plateau: how many sessions and since when, sparkline of just that stretch
+    const run = p.e.slice(-p.plat);
+    return `<button class="prow" data-act="exDetail" data-arg="${p.id}"><span class="grow"><b>${esc(exById(p.id).name)}${trendTag('plateau')}</b><span style="color:var(--pink)">da ${p.plat} sedute · dal ${shortDate(run[0].t)}</span></span>${spark(run.map(x => x.e1), 'var(--pink)')}<span class="v">${fmt(half(p.cur))}</span></button>`;
+  }
   // Volume: last session's volume vs the last session at least 2 weeks ago, like the 1RM.
   const vol = V.prog === 'vol', pts = vol ? p.pts.filter(x => x.vol > 0) : p.e, key = vol ? 'vol' : 'e1';
   const curV = vol ? (pts.length ? pts[pts.length - 1].vol : 0) : p.cur;
@@ -798,7 +897,7 @@ function progRow(p) {
   const cls = d == null ? '' : d >= step ? 'up' : d <= -step ? 'down' : '';
   const txt = d == null ? 'nuovo' : d >= step ? '↑ +' + fmt(d) + ' kg' : d <= -step ? '↓ −' + fmt(-d) + ' kg' : '→ stabile';
   const col = cls === 'up' ? 'var(--green)' : cls === 'down' ? 'var(--orange)' : 'var(--muted)';
-  return `<button class="prow" data-act="exDetail" data-arg="${p.id}"><span class="grow"><b>${esc(exById(p.id).name)}</b><span class="${cls}">${txt}</span></span>${pts.length ? spark(pts.slice(-8).map(x => x[key]), col) : ''}<span class="v">${fmt(vol ? Math.round(curV) : half(curV))}</span></button>`;
+  return `<button class="prow" data-act="exDetail" data-arg="${p.id}"><span class="grow"><b>${esc(exById(p.id).name)}${trendTag(trend(p.e.map(x => x.e1)))}</b><span class="${cls}">${txt}</span></span>${pts.length ? spark(pts.slice(-8).map(x => x[key]), col) : ''}<span class="v">${fmt(vol ? Math.round(curV) : half(curV))}</span></button>`;
 }
 function lineChart(pts, color, opt = {}) {
   if (!pts.length) return '<div class="empty">Nessun dato</div>';
@@ -807,16 +906,9 @@ function lineChart(pts, color, opt = {}) {
   const y0 = mn - pad, y1 = mx + pad, t0 = pts[0].x, t1 = pts[pts.length - 1].x;
   const X = t => t1 === t0 ? L + (W - L - R) / 2 : L + (t - t0) / (t1 - t0) * (W - L - R);
   const Y = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
-  let best = -Infinity, marks = '';
-  const top = Math.max(...ys);
-  if (opt.pr) pts.forEach(p => {
-    if (p.y > best) {
-      best = p.y;
-      const at = p.y === top;
-      marks += `<circle cx="${X(p.x)}" cy="${Y(p.y)}" r="${at ? 6 : 4}" fill="${at ? 'var(--orange-fill)' : color}" stroke="var(--card)" stroke-width="2"/>`;
-      if (at) marks += `<text x="${Math.min(X(p.x), W - 40)}" y="${Y(p.y) - 10}" text-anchor="middle" style="fill:var(--orange);font-weight:700">PR ${fmt(half(p.y))}</text>`;
-    }
-  });
+  let marks = opt.mood ? pts.map(p => `<circle cx="${X(p.x)}" cy="${Y(p.y)}" r="3.5" fill="${MOOD_FILL[p.m] || 'var(--green-dim)'}" stroke="var(--card)" stroke-width="1.5"/>`).join('') : '';
+  const pr = opt.pr && pts.find(p => p.y === mx); // first time the record was reached: ring + label
+  if (pr) marks += `<circle cx="${X(pr.x)}" cy="${Y(pr.y)}" r="7" fill="none" stroke="var(--orange)" stroke-width="2.5"/><text x="${Math.min(X(pr.x), W - 40)}" y="${Y(pr.y) - 12}" text-anchor="middle" style="fill:var(--orange);font-weight:700">PR ${fmt(half(pr.y))}</text>`;
   const line = pts.map(p => X(p.x).toFixed(1) + ',' + Y(p.y).toFixed(1)).join(' ');
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opt.label || 'grafico')}">
     <line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="var(--sep)"/>
@@ -934,12 +1026,12 @@ function openMood(id) {
 }
 
 function viewCharts() {
-  const now = new Date(), k = costanzaKpi(), prog = progressData(), ps = pauseSeries(), lastP = ps[ps.length - 1], recent = ps.slice(-12);
+  const now = new Date(), k = costanzaKpi(), prog = progList(), ps = pauseSeries(), lastP = ps[ps.length - 1], recent = ps.slice(-12);
   return `<div style="display:flex;flex-direction:column;gap:2px;padding:0 4px 4px"><span class="kicker" style="padding:0">${MONTHS_FULL[now.getMonth()]} ${now.getFullYear()}</span><h1 class="h1" style="margin:0">Grafici</h1></div>
 
   <section class="blk" data-act="open" data-arg="costanza">
     <div class="row-between" style="align-items:flex-start">
-      <div style="display:flex;gap:18px;flex-wrap:wrap"><div class="kpi"><b>${k.c}</b><span>sedute</span></div><div class="kpi"><b style="color:var(--green)">${fmt1(k.avg)}</b><span>/sett</span></div></div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap"><div class="kpi"><b>${k.c}</b><span>sedute</span></div><div class="kpi"><b style="color:var(--green)">${fmt1(k.avg)}</b><span>/sett</span></div><div class="kpi"><b style="color:var(--orange)">${streak()}</b><span>sett. di fila</span></div></div>
       <button class="go-btn" data-act="open" data-arg="costanza" aria-label="Dettaglio costanza">${IC.chevR}</button>
     </div>
     ${calendar(18)}
@@ -948,8 +1040,8 @@ function viewCharts() {
   </section>
 
   <section class="blk" style="gap:6px" data-act="open" data-arg="progressi">
-    <div class="row-between" style="margin-bottom:8px">${progToggle()}<span class="muted" style="font-size:13px;text-align:right">vs 2 sett. fa</span></div>
-    ${prog.length ? prog.slice(0, 4).map(progRow).join('<div class="hr"></div>') : '<div class="empty">Registra delle serie per vedere i progressi.</div>'}
+    <div class="row-between" style="margin-bottom:8px">${progToggle()}<span class="muted" style="font-size:13px;text-align:right">${V.prog === 'plateau' ? 'senza progressi' : 'vs 2 sett. fa'}</span></div>
+    ${prog.length ? prog.slice(0, 4).map(progRow).join('<div class="hr"></div>') : `<div class="empty">${V.prog === 'plateau' ? 'Nessun esercizio in plateau.' : 'Registra delle serie per vedere i progressi.'}</div>`}
     ${prog.length ? `<button class="btn sm" style="margin-top:8px" data-act="open" data-arg="progressi">Tutti gli esercizi</button>` : ''}
   </section>
 
@@ -979,13 +1071,14 @@ function viewCostanza() {
     months += `<div class="mcal"><b>${MONTHS_FULL[m]} ${y !== now.getFullYear() ? y : ''} <span class="muted" style="font-weight:600">· ${c}</span></b><div class="g">${cells}</div></div>`;
   }
   return backBtn('Grafici') + `<h1 class="h1 sm">Costanza</h1>
-    <div class="blk"><div style="display:flex;gap:18px"><div class="kpi"><b>${k.c}</b><span>sedute questo mese</span></div></div><div class="kpi"><b style="color:var(--green);font-size:32px">${fmt1(k.avg)}</b><span>sedute a settimana</span></div></div>
+    <div class="blk"><div style="display:flex;gap:18px"><div class="kpi"><b>${k.c}</b><span>sedute questo mese</span></div></div><div class="kpi"><b style="color:var(--green);font-size:32px">${fmt1(k.avg)}</b><span>sedute a settimana</span></div><div class="kpi"><b style="color:var(--orange);font-size:32px">${streak()}</b><span>settimane di fila con almeno ${S.settings.weekGoal} ${S.settings.weekGoal === 1 ? 'giorno' : 'giorni'}</span></div></div>
     <div class="blk"><span class="blk-title">Sedute per mese</span>${monthBars(12)}</div>
     <div class="blk"><span class="blk-title">Ultimi 12 mesi</span>${moodLegend()}<div class="months-grid">${months}</div></div>`;
 }
 function viewProgressi() {
-  const prog = progressData();
-  return backBtn('Grafici') + `<h1 class="h1 sm">Progressi</h1><div>${progToggle()}</div><p class="muted" style="margin:0 4px;font-size:14px">${V.prog === 'vol' ? 'Volume: serie × ripetizioni × kg dell\'ultima seduta, riscaldamenti esclusi.' : 'Epley: peso × (1 + rep/30). Esclusi riscaldamenti e serie oltre 12 rep.'}</p>
+  const prog = progList();
+  return backBtn('Grafici') + `<h1 class="h1 sm">Progressi</h1><div>${progToggle()}</div><p class="muted" style="margin:0 4px;font-size:14px">${V.prog === 'vol' ? 'Volume: serie × ripetizioni × kg dell\'ultima seduta, riscaldamenti esclusi.' : V.prog === 'plateau' ? `Solo gli esercizi senza un miglioramento oltre ±${fmt(S.settings.trendTol)}% del 1RM da almeno 5 sedute, i più lunghi in cima.` : 'Epley: peso × (1 + rep/30). Esclusi riscaldamenti e serie oltre 12 rep.'}</p>
+    <p class="muted" style="margin:0 4px;font-size:14px">Icona accanto al nome: andamento del 1RM nelle ultime 3 sedute dell'esercizio (soglia ±${fmt(S.settings.trendTol)}%). Freccia su = in progressione, giù = in calo per 2 sedute, lineetta = stabile, rosa = possibile plateau (nessun miglioramento in 5 sedute).</p>
     <div class="blk" style="gap:6px">${prog.map(progRow).join('<div class="hr"></div>') || '<div class="empty">Nessun dato</div>'}</div>`;
 }
 function viewExercise(s) {
@@ -994,12 +1087,13 @@ function viewExercise(s) {
   const pr = p.e.reduce((a, b) => b.e1 > a.e1 ? b : a);
   return backBtn('Indietro') + `<h1 class="h1 sm">${esc(exById(p.id).name)}</h1>
     <div class="grid2">
-      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px">${fmt(half(p.cur))}</b><span>kg</span></div><span class="muted" style="font-size:14px;font-weight:600">1RM attuale</span></div>
-      <div class="blk" style="padding:16px;gap:4px"><div class="kpi"><b style="font-size:32px;color:var(--orange)">${fmt(half(pr.e1))}</b><span>kg</span></div><span class="muted" style="font-size:14px;font-weight:600">record · ${shortDate(pr.t)}</span></div>
+      ${kpiCard(fmt(half(p.cur)), '1RM attuale', '', 'kg')}
+      ${kpiCard(fmt(half(pr.e1)), 'record · ' + shortDate(pr.t), 'var(--orange)', 'kg')}
     </div>
-    <div class="blk"><span class="blk-title">1RM stimato</span>${lineChart(p.e.map(x => ({ x: x.t, y: x.e1 })), 'var(--green)', { pr: true, label: '1RM stimato nel tempo' })}
-      <span class="muted" style="font-size:12px">Punti = nuovi record · arancione = record assoluto</span></div>
-    <div class="blk"><span class="blk-title">Volume totale (kg)</span>${lineChart(p.pts.map(x => ({ x: x.t, y: x.vol })), 'var(--blue)', { label: 'Volume per seduta' })}</div>`;
+    <div class="blk"><span class="blk-title">1RM stimato</span>${lineChart(p.e.map(x => ({ x: x.t, y: x.e1, m: x.mood })), 'var(--green)', { pr: true, mood: true, label: '1RM stimato nel tempo' })}
+      ${moodLegend()}<span class="muted" style="font-size:12px">Punti colorati per umore della seduta · anello arancione = record</span></div>
+    <div class="blk"><span class="blk-title">Volume totale (kg)</span>${lineChart(p.pts.map(x => ({ x: x.t, y: x.vol })), 'var(--blue)', { label: 'Volume per seduta' })}</div>
+    <span class="section-label">Ultime sedute</span>${exHistory(p.id, 5)}`;
 }
 function viewPause() {
   const ps = pauseSeries(), recent = ps.slice(-20);
@@ -1063,7 +1157,7 @@ const ACT = {
   session(id) { closeSheet(); V.stack.push({ k: 'session', id }); window.scrollTo(0, 0); render(); },
   exDetail(id) { V.stack.push({ k: 'exercise', id }); window.scrollTo(0, 0); render(); },
   closeSheet,
-  skipSplash() { const el = document.getElementById('splash'); if (el) el.remove(); },
+  skipSplash() { const el = document.getElementById('splash'); if (el) { el.remove(); const h = $('#app .hello'); if (h) h.classList.add('go'); } },
 
   start: id => startSession(id),
   confirm: confirmSet,
@@ -1110,6 +1204,7 @@ const ACT = {
   },
 
   editSet: id => openEditSet(id),
+  history: id => showSheet(() => `<h2>${esc(exById(id).name)}</h2><span class="lab">Ultime volte</span>${exHistory(id, 3)}<button class="btn primary" data-act="closeSheet">Chiudi</button>`),
   edAdj(arg) { const [k, d] = arg.split('|'); const f = V.edit; f[k] = k === 'weight' ? Math.max(0, f.weight + d * S.settings.step) : Math.max(1, f.reps + +d); refreshSheet(); },
   edType(t) { V.edit.type = t; refreshSheet(); },
   edSave() {
@@ -1163,6 +1258,12 @@ const ACT = {
     ask('Eliminare la scheda?', 'Lo storico delle sessioni resta invariato.', 'Elimina scheda', () => {
       S.templates = S.templates.filter(t => t.id !== id); V.stack.pop(); done();
     });
+  },
+  // The copy goes right after the original and opens, ready to rename.
+  tplDuplicate() {
+    const t = curTpl(), c = { id: uid(), name: t.name + ' (copia)', items: JSON.parse(JSON.stringify(t.items)) };
+    S.templates.splice(S.templates.indexOf(t) + 1, 0, c);
+    V.stack[V.stack.length - 1] = { k: 'scheda', id: c.id }; window.scrollTo(0, 0); done();
   },
   yes() { const f = V.onYes; V.onYes = null; closeSheet(); if (f) f(); },
   tplPicker() { openPicker(); },
@@ -1227,9 +1328,10 @@ const ACT = {
   },
   dingToggle() { S.settings.ding = !S.settings.ding; if (S.settings.ding) audio(); save(); refreshSheet(); render(); },
   dingTest() { ding(); },
+  theme(t) { S.settings.theme = t; done(); },
   dist(m) { V.dist = m; render(); },
   prog(m) { V.prog = m; render(); },
-  startTab(m) { V.startTab = m; render(); },
+  startTab(m) { if (V.startTab !== m) V.swap = true; V.startTab = m; render(); }, // only the list under the switch animates
   editName() {
     V.tplName = S.settings.name;
     showSheet(() => `<h2>Il tuo nome</h2><p>Per il saluto nella schermata Workout.</p><label class="field"><input data-in="tplName" value="${esc(V.tplName)}" placeholder="Nome" aria-label="Nome" autocapitalize="words"></label><button class="btn primary" data-act="nameSave">Salva</button>`);
@@ -1267,6 +1369,13 @@ const ACT = {
       if (!w) return notice(`Nessun backup online per "${S.settings.user}".`);
       offerRestore(w, S.settings.user);
     } catch (e) { notice('Backup online non raggiungibile. Controlla la connessione.'); }
+  },
+  // Manual send: backup() still skips an empty app and sends nothing when nothing changed.
+  async cloudSend() {
+    const before = lsGet('.cloudAt');
+    if (!(await backup())) return notice('Invio non riuscito. Controlla la connessione e riprova.');
+    render(); // refresh the "Ultimo backup" line under the buttons
+    notice(lsGet('.cloudAt') !== before ? 'Dati inviati online.' : 'Niente di nuovo da inviare.');
   },
   showAll() { V.showAll = true; $('#ex-results').innerHTML = exResults(); },
 
@@ -1454,6 +1563,27 @@ function selftest() {
     const act = n => ({ ...good, active: { id: 'a', name: 'z', start: 1, sets: [], plan: [], cur: 'x0', drop: null, timer: { run: false, start: 0, acc: 0 }, entry: { exId: 'x0', type: 'normal', n, k: 0, weight: 20, reps: 10, ref: null } } });
     eq('accetta sessione in corso', valid(act(1)), true);
     const del = fresh(); del.exercises = del.exercises.filter(e => e.name !== 'Bench Press'); del.removed = ['bench press'];
+    const wk = (k, d) => monday(Date.now()) - k * 7 * DAY + d * DAY + 12 * 3600000; // week k ago, day d, noon
+    const ses = ts => ({ id: uid(), name: 'T', start: ts, sets: [] });
+    S.active = null; S.settings.weekGoal = 2;
+    S.sessions = [ses(wk(3, 0)), ses(wk(2, 0)), ses(wk(2, 2)), ses(wk(1, 1)), ses(wk(1, 1) + 3600000), ses(wk(1, 3))];
+    eq('streak: settimana in corso non ancora fatta non rompe', streak(), 2);
+    S.sessions.push(ses(Math.min(Date.now(), wk(0, 0))), ses(Date.now() - 1000));
+    if (new Date().getDay() !== 1) eq('streak: obiettivo raggiunto anche questa settimana', streak(), 3); // on Mondays both are the same day
+    S.settings.weekGoal = 0; eq('streak: obiettivo 0 non va in loop', streak() >= 0, true);
+    const pset = (w, r) => ({ id: uid(), exId: 'x0', type: 'normal', n: 1, k: 0, weight: w, reps: r, ts: noon });
+    S.sessions = [{ id: 'a', name: 'T', start: 1, sets: [pset(60, 8)] }, { id: 'b', name: 'T', start: 2, sets: [pset(62.5, 8)] }, { id: 'c', name: 'T', start: 3, sets: [pset(50, 8), pset(80, 15)] }];
+    eq('record: solo la seduta che supera le precedenti', [...prSessions()].join(), 'b');
+    eq('miglior 1RM storico (62,5×8)', half(bestE1('x0', S.sessions)), 79);
+    S.settings.trendTol = 2;
+    eq('trend: meno di 3 sedute = nessuno', trend([100, 105]), null);
+    eq('trend: +3% = su', trend([100, 101, 103]), 'up');
+    eq('trend: una sola seduta storta = stabile', trend([100, 97, 99]), 'flat');
+    eq('trend: due sedute in calo = giù', trend([100, 97, 96]), 'down');
+    eq('trend: 5 sedute senza crescita = plateau', trend([100, 101, 100, 101, 100.5]), 'plateau');
+    eq('plateau: durata minima 5 sedute', plateauLen([90, 100, 101, 100, 101, 100.5]), 5);
+    eq('plateau: conta anche le sedute prima se non superate', plateauLen([102, 100, 101, 100, 101, 100.5]), 6);
+    eq('tema sconosciuto torna automatico', migrate({ ...fresh(), settings: { theme: '"><b>' } }).settings.theme, 'auto');
     eq('esercizio eliminato non torna', migrate(del).exercises.some(e => e.name === 'Bench Press'), false);
     eq('rifiuta codice nella serie in corso', valid(act('<img src=x onerror=alert(1)>')), false);
   } catch (err) { res.push([false, 'errore: ' + err.message, '', '']); }
