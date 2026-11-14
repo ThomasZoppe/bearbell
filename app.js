@@ -34,7 +34,7 @@ function fresh() {
   return {
     v: 1,
     exercises: LIBRARY.map((e, i) => ({ id: 'x' + i, name: e[0], primary: e[1], secondary: e[2], bodyweight: !!e[3] })),
-    templates: [], sessions: [], settings: { ...DEFAULTS }, active: null,
+    templates: [], sessions: [], settings: { ...DEFAULTS }, active: null, removed: [],
   };
 }
 // Trust boundary: localStorage and imported files.
@@ -47,10 +47,15 @@ function valid(s) {
   const okItem = i => i && ID(i.exId) && typeof i.sets === 'number' && isFinite(i.sets) && (i.group == null || ID(i.group)) && (i.dropSets == null || (Array.isArray(i.dropSets) && i.dropSets.every(n => typeof n === 'number')));
   const okT = s.templates.every(t => t && ID(t.id) && typeof t.name === 'string' && Array.isArray(t.items) && t.items.every(okItem));
   const okSet = x => x && ID(x.id) && ID(x.exId) && typeof x.ts === 'number' && typeof x.reps === 'number' && isFinite(x.reps) && typeof x.weight === 'number' && isFinite(x.weight) && optNum(x.n) && optNum(x.k);
-  const okS = s.sessions.every(x => x && ID(x.id) && typeof x.start === 'number' && typeof x.name === 'string' && Array.isArray(x.sets) && x.sets.every(okSet) && (x.mood == null || MOODS.includes(x.mood)) && (x.plan == null || (Array.isArray(x.plan) && x.plan.every(okItem))));
-  const a = s.active;
-  const okA = a == null || (ID(a.id) && typeof a.name === 'string' && typeof a.start === 'number' && Array.isArray(a.sets) && a.sets.every(okSet) && Array.isArray(a.plan) && a.plan.every(okItem) && a.entry && ID(a.entry.exId));
-  return okEx && okT && okS && okA;
+  const okS = s.sessions.every(x => x && ID(x.id) && typeof x.start === 'number' && optNum(x.end) && typeof x.name === 'string' && Array.isArray(x.sets) && x.sets.every(okSet) && (x.mood == null || MOODS.includes(x.mood)) && (x.plan == null || (Array.isArray(x.plan) && x.plan.every(okItem))));
+  const a = s.active, num = v => typeof v === 'number' && isFinite(v);
+  // Every entry/drop/timer number is printed in the workout screen, so all of them are checked.
+  const okE = e => e && ID(e.exId) && num(e.n) && num(e.k) && num(e.weight) && num(e.reps) && (e.ref == null || (num(e.ref.weight) && num(e.ref.reps)));
+  const okA = a == null || (ID(a.id) && typeof a.name === 'string' && typeof a.start === 'number' && Array.isArray(a.sets) && a.sets.every(okSet) && Array.isArray(a.plan) && a.plan.every(okItem) && okE(a.entry)
+    && (a.cur == null || ID(a.cur)) && (a.drop == null || (ID(a.drop.exId) && num(a.drop.n) && num(a.drop.k)))
+    && a.timer && typeof a.timer.run === 'boolean' && num(a.timer.start) && num(a.timer.acc));
+  const okR = s.removed == null || (Array.isArray(s.removed) && s.removed.every(n => typeof n === 'string'));
+  return okEx && okT && okS && okA && okR;
 }
 function migrate(s) {
   s.settings = { ...DEFAULTS, ...(s.settings || {}) };
@@ -58,8 +63,9 @@ function migrate(s) {
     const v = s.settings[k];
     if (typeof v !== typeof DEFAULTS[k] || (typeof v === 'number' && !isFinite(v))) s.settings[k] = DEFAULTS[k];
   }
-  // New library exercises reach existing installs; the ones already saved keep the user's edits.
-  const have = new Set(s.exercises.map(e => e.name.toLowerCase()));
+  // New library exercises reach existing installs; the ones already saved keep the user's edits, deleted ones stay deleted.
+  s.removed = s.removed || [];
+  const have = new Set([...s.exercises.map(e => e.name.toLowerCase()), ...s.removed]);
   LIBRARY.forEach((e, i) => { if (!have.has(e[0].toLowerCase())) s.exercises.push({ id: 'x' + i + '-' + uid(), name: e[0], primary: e[1], secondary: e[2], bodyweight: !!e[3] }); });
   s.active = s.active || null;
   s.sessions.forEach(x => { x.plan = x.plan || []; x.sets.forEach(z => { z.k = z.k || 0; z.n = z.n || 1; z.type = z.type || 'normal'; }); });
@@ -81,8 +87,9 @@ function save() {
 }
 
 /* ---------- Backup cloud ---------- */
-// Only the last copy per user is kept on the server. Sent on "Concludi", when the app goes to the
-// background, every 10 minutes and when the signal comes back — but only if something changed.
+// Only the last copy per user is kept on the server. Sent only when something is stored for good:
+// a finished workout (and its mood), a new or edited exercise, a deleted workout, a user switch.
+// Other changes stay local and travel with the next of these.
 let rev = 0, sending = false;
 const USER_RE = /^[a-z0-9._-]{2,30}$/;
 const cloudUrl = u => '/api/backup?user=' + encodeURIComponent(u);
@@ -98,7 +105,7 @@ async function backup() {
   let ok = false;
   sending = true;
   try {
-    // keepalive lets the upload finish while iOS suspends the app, but only for small bodies.
+    // keepalive lets the upload finish if the app is closed right after, but only for small bodies.
     const res = await fetch(cloudUrl(u), { method: 'PUT', body, headers: { 'content-type': 'application/json' }, keepalive: body.length < 60000 });
     if (res.ok) { ok = true; lsSet('.cloudAt', String((await res.json()).savedAt || Date.now())); if (rev === r) lsSet('.pending', null); }
   } catch (e) { /* offline: retry at the next trigger */ }
@@ -108,14 +115,13 @@ async function backup() {
 // Changing user swaps the data on this phone: the old user's data is sent to their backup first,
 // then the new user's backup is loaded (or an empty app if they have none). Never mixes the two.
 async function switchUser(old, u) {
+  if (sending) return notice('Backup in corso, riprova tra un attimo.');
   let w;
   try {
     if (!(await backup())) throw new Error('upload');
     w = u === TEST ? null : await fetchBackup(u);
   } catch (e) { return notice(`Serve la connessione per cambiare utente. I dati di "${old}" sono ancora su questo telefono.`); }
-  S = w ? migrate(w.data) : u === TEST ? demoData() : fresh();
-  S.settings.user = u; V.stack = []; V.tab = 'setup';
-  lsSet('.cloudAt', w ? String(w.savedAt) : null); done(); lsSet('.pending', null);
+  replaceData(w ? w.data : u === TEST ? demoData() : fresh(), w && w.savedAt, u);
   notice(u === TEST ? 'Utente di prova: dati d\'esempio, mai salvati online.' : w ? `Caricati i dati di "${u}".` : `"${u}" non ha ancora un backup: si parte da zero.`);
 }
 async function fetchBackup(u) {
@@ -126,12 +132,16 @@ async function fetchBackup(u) {
   if (!w || !valid(w.data)) throw new Error('formato');
   return w;
 }
-function offerRestore(w) {
+// Phone data becomes `data` (already valid) under `user`; it matches the online copy, so nothing is pending.
+function replaceData(data, savedAt, user) {
+  S = migrate(data); S.settings.user = user; V.stack = []; V.tab = 'setup';
+  lsSet('.cloudAt', savedAt ? String(savedAt) : null); done(); lsSet('.pending', null);
+}
+// The username is set only on "Ripristina": declining must never let this phone overwrite that backup.
+function offerRestore(w, user) {
   const d = new Date(w.savedAt);
-  ask('Ripristinare il backup?', `Backup di "${S.settings.user}" del ${shortDate(w.savedAt)} alle ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}. I dati di questo telefono verranno sostituiti.`, 'Ripristina', () => {
-    const user = S.settings.user;
-    S = migrate(w.data); S.settings.user = user; V.stack = []; V.tab = 'setup';
-    lsSet('.cloudAt', String(w.savedAt)); done(); lsSet('.pending', null);
+  ask('Ripristinare il backup?', `Backup di "${user}" del ${shortDate(w.savedAt)} alle ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}. I dati di questo telefono verranno sostituiti.`, 'Ripristina', () => {
+    replaceData(w.data, w.savedAt, user);
     notice('Backup ripristinato.');
   });
 }
@@ -200,6 +210,7 @@ const IC = {
   back: svg('<path d="M15 6l-6 6 6 6"/>', 20, 2.6),
   up: svg('<path d="M6 15l6-6 6 6"/>', 16, 2.6),
   plus: svg('<path d="M12 5v14M5 12h14"/>', 20, 2.6),
+  x: svg('<path d="M7 7l10 10M17 7L7 17"/>', 18, 2.6),
   check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>', 24, 3),
   timer: svg('<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6"/>', 18, 2.2),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', 16, 2.2),
@@ -296,6 +307,7 @@ function confirmSet() {
   if (!(e.reps > 0)) { notice('Inserisci almeno 1 ripetizione.'); return; }
   if (S.settings.ding) audio();
   const now = Date.now(), prev = a.sets[a.sets.length - 1];
+  V.flash = true; // "Conferma" rolls the new numbers in (#app.flash in the CSS)
   a.sets.push({ id: uid(), exId: e.exId, n: e.n, k: e.k, type: e.type, reps: e.reps, weight: e.weight, ts: now, gap: prev ? Math.round((now - prev.ts) / 1000) : null });
   if (e.type === 'drop') { a.drop = { exId: e.exId, n: e.n, k: e.k + 1 }; prepare(e.exId, 'drop'); return done(); }
   advance(e.exId, e.type);
@@ -355,7 +367,8 @@ function render() {
   else if (V.tab === 'workout') html = A() ? viewActive() : viewStart();
   else if (V.tab === 'setup') html = viewSetup();
   else html = viewCharts();
-  app.className = (!s && V.tab === 'workout' && A() ? 'fit ' : '') + anim;
+  app.className = (!s && V.tab === 'workout' && A() ? 'fit ' : '') + anim + (V.flash ? ' flash' : '');
+  V.flash = false; // one-shot: the next render (e.g. a ± tap) drops the class
   app.innerHTML = html;
   placeSegs(segs);
   renderNav();
@@ -432,10 +445,10 @@ function viewActive() {
         <button class="pill blue" data-act="timerOpen" aria-label="${V.timerOpen ? 'Chiudi' : 'Apri'} timer pausa">${V.timerOpen ? IC.up + 'Riduci' : IC.timer + `<span data-live="tpill">Pausa</span>`}</button>
         ${V.timerOpen ? '' : `<button class="pill" data-act="finishAsk">Fine</button>`}
       </div></div>
-    <button class="ex-card" data-act="picker" aria-label="Cambia esercizio">
+    <div class="ex-wrap"><button class="ex-card ${V.exMenu ? 'open' : ''}" data-act="picker" aria-label="Cambia esercizio" aria-expanded="${!!V.exMenu}">
       <span class="badge ${lab.ss ? 'ss' : ''}">${lab.t}</span>
       <span class="grow"><span class="name">${esc(ex.name)}</span><span class="dots">${dots}<span class="lbl">${status}</span></span></span>
-      ${IC.chevD}</button>`;
+      ${IC.chevD}</button>${V.exMenu ? exMenu() : ''}</div>`;
   const since = restRef() ? `<div class="since">${IC.clock}Dalla serie precedente <b data-live="since"></b></div>` : '';
   const lastTxt = e.ref ? `${fmt(e.ref.weight)} × ${e.ref.reps}` : '—';
   const confirmBtn = `<button class="confirm" data-act="confirm">${IC.check}${e.k > 0 ? 'Conferma drop' : 'Conferma serie'}</button>`;
@@ -503,21 +516,20 @@ function openFinish() {
 }
 
 /* Picker esercizi (workout e schede) */
-function openPicker(mode) {
-  V.pq = ''; V.pickMode = mode;
-  showSheet(() => {
-    let top = '';
-    if (mode === 'workout') {
-      const a = A(), labs = labelsOf(a.plan);
-      top = `<div class="list">${a.plan.map(i => `<button class="li" data-act="pickEx" data-arg="${i.exId}" ${i.exId === a.cur ? 'aria-current="true"' : ''}>
-        <span class="badge ${labs.get(i).ss ? 'ss' : ''}">${labs.get(i).t}</span><span class="grow"><span style="${i.exId === a.cur ? 'font-weight:700' : ''}">${esc(exById(i.exId).name)}</span></span><span class="val">${workDone(i.exId)}/${i.sets}</span></button>`).join('')}</div>
-        <span class="lab">Altri esercizi</span>`;
-    }
-    return `<h2>${mode === 'workout' ? 'Esercizio' : 'Aggiungi esercizio'}</h2>${top}
-      <label class="field">${IC.search}<input type="search" data-in="pq" placeholder="Cerca esercizio" aria-label="Cerca esercizio"></label>
-      <div class="list" id="pick-results">${pickList()}</div>
-      <button class="btn blue-t" data-act="newExPick">${IC.plus}Crea nuovo esercizio</button>`;
-  });
+const pickSearch = () => `<label class="field">${IC.search}<input type="search" data-in="pq" value="${esc(V.pq)}" placeholder="Cerca esercizio" aria-label="Cerca esercizio"></label>
+  <div class="list" id="pick-results">${pickList()}</div>
+  <button class="btn blue-t" data-act="newExPick">${IC.plus}Crea nuovo esercizio</button>`;
+function openPicker() {
+  V.pq = ''; V.pickMode = 'tpl';
+  showSheet(() => `<h2>Aggiungi esercizio</h2>${pickSearch()}`);
+}
+// Workout: the exercise menu drops down from the ex-card (own scroll, tap outside closes).
+function exMenu() {
+  const a = A(), labs = labelsOf(a.plan);
+  const rows = a.plan.map(i => `<div class="ex-row"><button class="li" data-act="pickEx" data-arg="${i.exId}" ${i.exId === a.cur ? 'aria-current="true"' : ''}>
+      <span class="badge ${labs.get(i).ss ? 'ss' : ''}">${labs.get(i).t}</span><span class="grow"><span style="${i.exId === a.cur ? 'font-weight:700' : ''}">${esc(exById(i.exId).name)}</span></span><span class="val">${workDone(i.exId)}/${i.sets}</span></button>
+      ${a.plan.length > 1 ? `<button class="rm" data-act="planRemove" data-arg="${i.exId}" aria-label="Rimuovi ${esc(exById(i.exId).name)}">${IC.x}</button>` : ''}</div>`).join('');
+  return `<div class="ex-menu-bg" data-act="picker"></div><div class="ex-menu"><div class="list">${rows}</div><span class="lab">Altri esercizi</span>${pickSearch()}</div>`;
 }
 function pickList() {
   const q = V.pq.trim().toLowerCase();
@@ -584,7 +596,8 @@ function openExForm(id) {
       <span class="lab">Distretti secondari</span>
       <div class="chips">${DISTRICTS.filter(d => d !== f.primary).map(d => `<button class="chip ss" aria-pressed="${f.secondary.includes(d)}" data-act="exSec" data-arg="${d}">${cap(d)}</button>`).join('')}</div>
       <div class="chips"><button class="chip ss" aria-pressed="${f.bodyweight}" data-act="exBw">Corpo libero</button></div>
-      <button class="btn primary" data-act="exSave">Salva</button>`;
+      <button class="btn primary" data-act="exSave">Salva</button>
+      ${f.id ? '<button class="btn danger" data-act="exDelete">Elimina esercizio</button>' : ''}`;
   });
 }
 
@@ -761,7 +774,7 @@ function progressData() {
   return Object.entries(per).map(([id, pts]) => {
     const e = pts.filter(p => p.e1 > 0);
     if (!e.length) return null;
-    const curV = e[e.length - 1].e1, cut = Date.now() - 28 * DAY;
+    const curV = e[e.length - 1].e1, cut = Date.now() - 14 * DAY;
     const base = [...e].reverse().find(p => p.t <= cut);
     return { id, pts, e, cur: curV, delta: base ? half(curV - base.e1) : null, lastT: pts[pts.length - 1].t };
   }).filter(Boolean).sort((a, b) => b.lastT - a.lastT);
@@ -777,10 +790,10 @@ const progToggle = () => `<div class="seg sm" role="radiogroup" aria-label="Metr
   <button role="radio" aria-checked="${V.prog !== 'vol'}" data-act="prog" data-arg="e1">1RM stimato</button>
   <button role="radio" aria-checked="${V.prog === 'vol'}" data-act="prog" data-arg="vol">Volume</button></div>`;
 function progRow(p) {
-  // Volume: last session's volume vs the last session at least 4 weeks ago, like the 1RM.
+  // Volume: last session's volume vs the last session at least 2 weeks ago, like the 1RM.
   const vol = V.prog === 'vol', pts = vol ? p.pts.filter(x => x.vol > 0) : p.e, key = vol ? 'vol' : 'e1';
   const curV = vol ? (pts.length ? pts[pts.length - 1].vol : 0) : p.cur;
-  const base = vol ? [...pts].reverse().find(x => x.t <= Date.now() - 28 * DAY) : null;
+  const base = vol ? [...pts].reverse().find(x => x.t <= Date.now() - 14 * DAY) : null;
   const d = vol ? (base ? Math.round(curV - base.vol) : null) : p.delta, step = vol ? 1 : 0.5;
   const cls = d == null ? '' : d >= step ? 'up' : d <= -step ? 'down' : '';
   const txt = d == null ? 'nuovo' : d >= step ? '↑ +' + fmt(d) + ' kg' : d <= -step ? '↓ −' + fmt(-d) + ' kg' : '→ stabile';
@@ -935,7 +948,7 @@ function viewCharts() {
   </section>
 
   <section class="blk" style="gap:6px" data-act="open" data-arg="progressi">
-    <div class="row-between" style="margin-bottom:8px">${progToggle()}<span class="muted" style="font-size:13px;text-align:right">vs 4 sett. fa</span></div>
+    <div class="row-between" style="margin-bottom:8px">${progToggle()}<span class="muted" style="font-size:13px;text-align:right">vs 2 sett. fa</span></div>
     ${prog.length ? prog.slice(0, 4).map(progRow).join('<div class="hr"></div>') : '<div class="empty">Registra delle serie per vedere i progressi.</div>'}
     ${prog.length ? `<button class="btn sm" style="margin-top:8px" data-act="open" data-arg="progressi">Tutti gli esercizi</button>` : ''}
   </section>
@@ -1044,7 +1057,7 @@ function notice(text) {
 
 /* ---------- Azioni ---------- */
 const ACT = {
-  tab(k) { V.tab = k; V.stack = []; V.select = null; window.scrollTo(0, 0); render(); },
+  tab(k) { V.tab = k; V.stack = []; V.exMenu = false; V.select = null; window.scrollTo(0, 0); render(); },
   back() { V.stack.pop(); V.select = null; render(); },
   open(k) { V.stack.push({ k }); window.scrollTo(0, 0); render(); },
   session(id) { closeSheet(); V.stack.push({ k: 'session', id }); window.scrollTo(0, 0); render(); },
@@ -1060,9 +1073,20 @@ const ACT = {
   r(d) { const e = A().entry; e.reps = Math.max(1, e.reps + +d); render(); },
   step() { S.settings.step = S.settings.step === 2.5 ? 1.25 : 2.5; done(); },
   setsAdj(d) { const it = planItem(A().cur); if (it) it.sets = Math.max(1, workDone(A().cur), it.sets + +d); done(); },
-  picker() { openPicker('workout'); },
+  picker() { closeSheet(); V.exMenu = !V.exMenu; V.pq = ''; V.pickMode = 'workout'; render(); },
+  planRemove(id) {
+    const a = A(), n = a.sets.filter(z => z.exId === id).length;
+    const go = () => {
+      a.plan = a.plan.filter(i => i.exId !== id); a.sets = a.sets.filter(z => z.exId !== id); normGroups(a.plan);
+      if (a.drop && a.drop.exId === id) a.drop = null;
+      if (a.cur === id) prepare(a.plan[0].exId, defaultType(a.plan[0].exId));
+      done();
+    };
+    if (!n) return go();
+    ask(`Rimuovere ${exById(id).name}?`, `Verranno cancellate anche le ${n} serie già registrate oggi.`, 'Rimuovi', go);
+  },
   pickEx(id) {
-    const a = A();
+    const a = A(); V.exMenu = false;
     if (!planItem(id)) a.plan.push({ exId: id, sets: 3, group: null, dropSets: [] });
     a.drop = null; prepare(id, defaultType(id)); closeSheet(); done();
   },
@@ -1094,16 +1118,16 @@ const ACT = {
     if (z.type !== f.type) { // rinumera la serie nel nuovo tipo
       const others = sess.sets.filter(q => q.exId === z.exId && q !== z);
       z.k = 0;
-      z.n = f.type === 'warmup' ? others.filter(q => q.type === 'warmup').length + 1 : others.filter(q => q.type !== 'warmup').reduce((m, q) => Math.max(m, q.n), 0) + 1;
+      z.n = others.filter(q => (q.type === 'warmup') === (f.type === 'warmup')).reduce((m, q) => Math.max(m, q.n), 0) + 1; // max + 1, like nextWarmN/nextWorkN
     }
     Object.assign(z, { weight: f.weight, reps: f.reps, type: f.type });
     if (sess === S.active && S.active.entry) prepare(S.active.cur, S.active.entry.type);
     closeSheet(); done();
   },
-  mood(arg) { const [id, m] = arg.split('|'), x = S.sessions.find(q => q.id === id); if (x && MOODS.includes(m)) x.mood = m; closeSheet(); done(); },
+  mood(arg) { const [id, m] = arg.split('|'), x = S.sessions.find(q => q.id === id); if (x && MOODS.includes(m)) x.mood = m; closeSheet(); done(); backup(); },
   sessDelete(id) {
     ask('Eliminare la sessione?', 'Tutte le sue serie verranno cancellate. Non si può annullare.', 'Elimina sessione', () => {
-      S.sessions = S.sessions.filter(x => x.id !== id); V.stack.pop(); done();
+      S.sessions = S.sessions.filter(x => x.id !== id); V.stack.pop(); done(); backup();
     });
   },
   edDelete() { ask('Eliminare questa serie?', 'Non si può annullare.', 'Elimina serie', ACT.edDeleteYes); },
@@ -1112,8 +1136,10 @@ const ACT = {
     if (!sess) return;
     sess.sets = sess.sets.filter(q => q.id !== f.id);
     if (sess === S.active) { if (S.active.drop && !sess.sets.some(q => q.exId === S.active.drop.exId && q.n === S.active.drop.n)) S.active.drop = null; prepare(S.active.cur, S.active.drop ? 'drop' : defaultType(S.active.cur)); }
-    else if (!sess.sets.length) { S.sessions = S.sessions.filter(x => x !== sess); V.stack.pop(); }
+    const gone = sess !== S.active && !sess.sets.length; // last set removed = the whole workout is deleted
+    if (gone) { S.sessions = S.sessions.filter(x => x !== sess); V.stack.pop(); }
     closeSheet(); done();
+    if (gone) backup();
   },
 
   scheda(id) { V.stack.push({ k: 'scheda', id }); V.select = null; window.scrollTo(0, 0); render(); },
@@ -1138,7 +1164,7 @@ const ACT = {
     });
   },
   yes() { const f = V.onYes; V.onYes = null; closeSheet(); if (f) f(); },
-  tplPicker() { openPicker('tpl'); },
+  tplPicker() { openPicker(); },
   tplAdd(id) { curTpl().items.push({ exId: id, sets: 3, group: null, dropSets: [] }); closeSheet(); done(); },
   tplSets(arg) { const [i, d] = arg.split('|'); const it = curTpl().items[+i]; it.sets = Math.max(1, Math.min(20, it.sets + +d)); it.dropSets = it.dropSets.filter(n => n <= it.sets); done(); },
   itemSheet: i => openItemSheet(+i),
@@ -1173,9 +1199,23 @@ const ACT = {
     const data = { name, primary: f.primary, secondary: f.secondary, bodyweight: f.bodyweight };
     const id = f.id || uid();
     if (f.id) Object.assign(S.exercises.find(e => e.id === f.id), data); else S.exercises.push({ id, ...data });
-    if (f.addTo === 'tpl') return ACT.tplAdd(id);
-    if (f.addTo === 'workout') return ACT.pickEx(id);
-    closeSheet(); done();
+    if (f.addTo === 'tpl') ACT.tplAdd(id);
+    else if (f.addTo === 'workout') ACT.pickEx(id);
+    else { closeSheet(); done(); }
+    backup(); // after done(): backup() only sends once save() has marked the change
+  },
+  exDelete() {
+    const id = V.exForm.id, e = S.exercises.find(x => x.id === id);
+    if (!e) return closeSheet();
+    // History shows exercises by id: deleting a used one would turn its past sets into "Esercizio rimosso".
+    if (allSessions().some(x => x.sets.some(z => z.exId === id)) || (S.active && S.active.plan.some(i => i.exId === id))) return notice('Questo esercizio è nello storico degli allenamenti: non si può eliminare.');
+    const n = S.templates.filter(t => t.items.some(i => i.exId === id)).length;
+    ask(`Eliminare ${e.name}?`, (n ? `Verrà tolto anche da ${n === 1 ? '1 scheda' : n + ' schede'}. ` : '') + 'Non si può annullare.', 'Elimina esercizio', () => {
+      S.exercises = S.exercises.filter(x => x !== e);
+      S.templates.forEach(t => { t.items = t.items.filter(i => i.exId !== id); normGroups(t.items); });
+      S.removed.push(e.name.toLowerCase()); // so migrate() doesn't bring a library exercise back
+      done(); backup();
+    });
   },
   setting: k => openSetting(k),
   setAdj(arg) {
@@ -1216,15 +1256,14 @@ const ACT = {
     // First name on this phone: an existing backup under it is offered before this phone's data replaces it.
     let w;
     try { w = await fetchBackup(u); } catch (e) { notice('Serve la connessione per scegliere il nome utente.'); return; }
-    S.settings.user = u; lsSet('.cloudAt', null); closeSheet(); done();
-    if (w) return offerRestore(w);
-    backup().then(render);
+    if (w) return offerRestore(w, u);
+    S.settings.user = u; lsSet('.cloudAt', null); closeSheet(); done(); // first upload comes with the next stored change
   },
   async cloudRestore() {
     try {
       const w = await fetchBackup(S.settings.user);
       if (!w) return notice(`Nessun backup online per "${S.settings.user}".`);
-      offerRestore(w);
+      offerRestore(w, S.settings.user);
     } catch (e) { notice('Backup online non raggiungibile. Controlla la connessione.'); }
   },
   showAll() { V.showAll = true; $('#ex-results').innerHTML = exResults(); },
@@ -1272,6 +1311,7 @@ document.addEventListener('change', e => {
   t.value = k === 'weight' ? fmt(A().entry.weight) : A().entry.reps;
   t.setAttribute('style', bigSize(t.value));
 });
+document.addEventListener('touchstart', () => {}, { passive: true }); // iOS Safari shows :active (press feedback) only with a touch listener
 document.addEventListener('focusin', e => { if (e.target.dataset.in === 'weight' || e.target.dataset.in === 'reps') e.target.select(); });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
@@ -1285,7 +1325,8 @@ $('#import-file').addEventListener('change', async e => {
     const data = JSON.parse(await file.text());
     if (!valid(data)) throw new Error('formato');
     ask('Importare il backup?', 'Tutti i dati attuali verranno sostituiti.', 'Importa', () => {
-      S = migrate(data); V.stack = []; V.tab = 'setup'; done();
+      const user = S.settings.user; // a file from someone else must not make this phone upload as them
+      S = migrate(data); S.settings.user = user; V.stack = []; V.tab = 'setup'; done();
       notice('Backup importato.');
     });
   } catch (err) { notice('File non valido: non è un backup di questa app.'); }
@@ -1393,12 +1434,26 @@ function selftest() {
     eq('ding non prima di 30 s + pausa', restDue(119), false);
     eq('ding a 30 s + pausa', restDue(120), true);
     eq('niente ding riaprendo molto dopo', restDue(600), false);
+    S.active = { id: 'act', name: 'T', start: noon, cur: 'x0', drop: null, entry: { exId: 'x0' },
+      plan: [{ exId: 'x0', sets: 3, group: null, dropSets: [] }, { exId: 'x1', sets: 3, group: null, dropSets: [] }],
+      sets: [{ id: 'k1', exId: 'x1', type: 'normal', n: 1, k: 0, weight: 50, reps: 8, ts: noon }] };
+    const realDone = done; done = () => {}; // the self-check must never save the fake data
+    try { ACT.planRemove('x0'); } finally { done = realDone; } // no sets on x0: removed without asking
+    eq('rimuovi esercizio: resta solo l\'altro', S.active.plan.map(i => i.exId).join(), 'x1');
+    eq('rimuovi esercizio: serie dell\'altro intatta', S.active.sets.length, 1);
+    eq('rimuovi esercizio in corso: passa al successivo', S.active.cur, 'x1');
+    S.active = null;
     eq('dati di prova validi', valid(JSON.parse(JSON.stringify(demoData()))), true);
     const good = JSON.parse(JSON.stringify(real));
     eq('rifiuta umore sconosciuto', valid({ ...good, sessions: [{ id: 'a', name: 'z', start: 1, sets: [], mood: '<b>' }] }), false);
     eq('backup attuale valido', valid(good), true);
     eq('rifiuta distretto con codice', valid({ ...good, exercises: [{ id: 'z', name: 'z', primary: 'petto', secondary: ['<img src=x onerror=alert(1)>'] }] }), false);
     eq('rifiuta id con virgolette', valid({ ...good, templates: [{ id: 'a"b', name: 'z', items: [] }] }), false);
+    const act = n => ({ ...good, active: { id: 'a', name: 'z', start: 1, sets: [], plan: [], cur: 'x0', drop: null, timer: { run: false, start: 0, acc: 0 }, entry: { exId: 'x0', type: 'normal', n, k: 0, weight: 20, reps: 10, ref: null } } });
+    eq('accetta sessione in corso', valid(act(1)), true);
+    const del = fresh(); del.exercises = del.exercises.filter(e => e.name !== 'Bench Press'); del.removed = ['bench press'];
+    eq('esercizio eliminato non torna', migrate(del).exercises.some(e => e.name === 'Bench Press'), false);
+    eq('rifiuta codice nella serie in corso', valid(act('<img src=x onerror=alert(1)>')), false);
   } catch (err) { res.push([false, 'errore: ' + err.message, '', '']); }
   S = real;
   const fails = res.filter(r => !r[0]).length;
@@ -1408,9 +1463,6 @@ function selftest() {
 }
 if (/[?&]selftest\b/.test(location.search)) setTimeout(selftest);
 
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') backup(); });
-window.addEventListener('online', backup);
-setInterval(backup, 10 * 60000);
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});

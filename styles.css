@@ -92,6 +92,18 @@ input { -webkit-user-select: text; user-select: text; }
 .badge.ss { background: var(--blue-bg); color: var(--blue); }
 .ex-card .grow { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ex-card .name { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+.ex-card > svg { transition: transform .25s; }
+.ex-card.open > svg { transform: rotate(180deg); }
+.ex-wrap { position: relative; z-index: 20; }
+.ex-wrap > .ex-card { position: relative; z-index: 1; }
+.ex-menu-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); }
+.ex-menu { position: absolute; left: 0; right: 0; top: calc(100% + 8px); max-height: calc(100dvh - var(--nav-h) - var(--safe-t) - 170px); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 12px; border-radius: 24px; background: var(--card2); box-shadow: 0 16px 40px rgba(0,0,0,.45); transform-origin: top center; animation: drop .22s cubic-bezier(.2, .8, .2, 1); }
+.ex-menu > * { flex-shrink: 0; }
+.ex-menu .list, .ex-menu .field { background: var(--card); }
+.ex-row { display: flex; align-items: center; }
+.ex-row .li { flex: 1; min-width: 0; }
+.ex-row .rm { width: 48px; align-self: stretch; display: flex; align-items: center; justify-content: center; color: var(--orange); flex-shrink: 0; }
+@keyframes drop { from { opacity: 0; transform: translateY(-8px) scaleY(.92); } }
 .dots { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .dot { width: 22px; height: 6px; border-radius: 3px; background: var(--card3); }
 .dot.done { background: var(--orange-fill); }
@@ -189,9 +201,11 @@ input { -webkit-user-select: text; user-select: text; }
 /* Sheet */
 .sheet-wrap { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-end; }
 .sheet-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.5); animation: fade .22s ease-out; }
-.sheet { position: relative; width: 100%; max-height: 88dvh; overflow-y: auto; background: var(--bg); border-radius: 28px 28px 0 0; padding: 10px 16px calc(var(--safe-b) + 18px); display: flex; flex-direction: column; gap: 12px; animation: up .22s ease-out; }
+.sheet { position: relative; width: 100%; max-height: 88dvh; overflow-y: auto; overscroll-behavior: contain; background: var(--bg); border-radius: 28px 28px 0 0; padding: 10px 16px calc(var(--safe-b) + 18px); display: flex; flex-direction: column; gap: 12px; animation: up .22s ease-out; }
 @media (prefers-color-scheme: dark) { .sheet { background: #111113; } }
 @keyframes up { from { transform: translateY(40px); opacity: 0; } }
+.sheet > * { flex-shrink: 0; }
+.sheet-backdrop { touch-action: none; }
 .sheet .grabber { width: 36px; height: 5px; border-radius: 3px; background: var(--card3); align-self: center; }
 .sheet h2 { margin: 4px 4px 0; font-size: 22px; font-weight: 800; }
 .sheet p { margin: 0 4px; color: var(--muted); font-size: 15px; }
@@ -314,6 +328,14 @@ input { -webkit-user-select: text; user-select: text; }
   #app.anim .dbar .f { transform-origin: left; animation: grow-x .55s .15s cubic-bezier(.2, .8, .2, 1) both; }
   #app.anim .chart polyline { stroke-dasharray: 3000; animation: draw .8s .1s ease-out both; }
   @keyframes draw { from { stroke-dashoffset: 3000; } to { stroke-dashoffset: 0; } }
+  /* After "Conferma serie": new numbers roll up out of a blur, the new set chip pops, the check bounces */
+  #app.flash .big input, #app.flash .ex-card .name, #app.flash .ex-card .lbl, #app.flash .last-row b, #app.flash .compact-entry .v { animation: roll .38s cubic-bezier(.2, .9, .3, 1.2) both; }
+  #app.flash .stepper + .stepper .big input { animation-delay: 50ms; }
+  #app.flash .ex-card .lbl, #app.flash .last-row b { animation-delay: 80ms; }
+  #app.flash .done-list button:last-child { animation: chip .4s cubic-bezier(.3, 1.5, .5, 1) both; }
+  #app.flash .confirm svg { animation: chip .45s cubic-bezier(.3, 1.6, .5, 1) both; }
+  @keyframes roll { from { opacity: 0; transform: translateY(55%) scale(.9); filter: blur(6px); } 60% { filter: blur(0); } }
+  @keyframes chip { from { opacity: 0; transform: scale(.4); } }
   /* Calendar squares pop in column by column; sparklines draw left to right */
   #app.anim .cal i { animation: cell .3s calc(.12s + var(--d, 0) * 16ms) cubic-bezier(.3, 1.4, .5, 1) both; }
   @keyframes cell { from { transform: scale(0); opacity: 0; } }
@@ -322,10 +344,13 @@ input { -webkit-user-select: text; user-select: text; }
   @keyframes draw1 { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
   .mood-btn { transition: transform .15s ease, opacity .2s; } .mood-btn:active { transform: scale(.94); }
   /* Press feedback */
-  .btn, .confirm, .rb, .pill, .tpl-card, .chip, .mini, .go-btn, .ex-card, .compact-entry, .timer-card .b button, .done-list button, .sets-step button { transition: transform .15s ease, background-color .2s, color .2s; }
-  .btn:active, .confirm:active, .rb:active, .pill:active, .tpl-card:active, .chip:active, .mini:active, .go-btn:active, .ex-card:active, .compact-entry:active, .timer-card .b button:active, .done-list button:active, .sets-step button:active { transform: scale(.96); }
+  button { transition: transform .15s ease, background-color .2s, color .2s, opacity .15s; }
+  button:active { transform: scale(.96); }
+  /* Full-width rows highlight instead of shrinking */
   .li, .prow, .set-line { transition: background-color .15s; }
-  .li:active, .set-line:active { background: var(--card2); }
+  button.li:active, button.set-line:active, button.prow:active { transform: none; background: var(--card2); }
+  .ex-menu button.li:active { background: var(--card3); }
+  .nav button:active { transform: scale(.92); }
   .dot { transition: background-color .3s, width .3s; }
 }
 @media (prefers-reduced-motion: reduce) {
