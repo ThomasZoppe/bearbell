@@ -5,11 +5,11 @@ const DISTRICTS = ['petto', 'dorso', 'spalle', 'bicipiti', 'tricipiti', 'avambra
 const MONTHS = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
 const MONTHS_FULL = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
 const DAYS = ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato'];
-const DEFAULTS = { name: '', user: '', exec: 30, bandMin: 10, bandMax: 20, minExtra: 15, maxMin: 15, step: 2.5 };
+const DEFAULTS = { name: '', user: '', exec: 30, bandMin: 10, bandMax: 20, minExtra: 15, maxMin: 15, step: 2.5, ding: true, rest: 90 };
 const KEY = 'palestra.v1';
 const DAY = 86400000;
 const MOODS = ['bene', 'mid', 'male'];
-const MOOD_L = { bene: 'Bene', mid: 'Mid', male: 'Male' };
+const MOOD_L = { bene: 'Bene', mid: 'Ok', male: 'Male' }; // 'mid' key kept for saved data
 const TEST = 'test'; // demo user: sample data, never uploaded
 
 const $ = s => document.querySelector(s);
@@ -294,6 +294,7 @@ function startSession(tid) {
 function confirmSet() {
   const a = A(), e = a.entry;
   if (!(e.reps > 0)) { notice('Inserisci almeno 1 ripetizione.'); return; }
+  if (S.settings.ding) audio();
   const now = Date.now(), prev = a.sets[a.sets.length - 1];
   a.sets.push({ id: uid(), exId: e.exId, n: e.n, k: e.k, type: e.type, reps: e.reps, weight: e.weight, ts: now, gap: prev ? Math.round((now - prev.ts) / 1000) : null });
   if (e.type === 'drop') { a.drop = { exId: e.exId, n: e.n, k: e.k + 1 }; prepare(e.exId, 'drop'); return done(); }
@@ -544,6 +545,7 @@ function viewSetup() {
     <span class="section-label">Impostazioni</span>
     <div class="list">
       <button class="li" data-act="editName"><span class="grow">Nome</span><span class="val">${esc(st.name) || 'Aggiungi'}</span></button>
+      <button class="li" data-act="setting" data-arg="rest"><span class="grow">Avviso fine pausa</span><span class="val">${st.ding ? mmss(st.rest) + ' + ' + st.exec + ' s' : 'No'}</span></button>
       <button class="li" data-act="setting" data-arg="exec"><span class="grow">Durata di una serie</span><span class="val">${st.exec} s</span></button>
       <button class="li" data-act="setting" data-arg="band"><span class="grow">Serie a settimana</span><span class="val">${st.bandMin} – ${st.bandMax}</span></button>
       <button class="li" data-act="setting" data-arg="minPause"><span class="grow">Pausa minima valida</span><span class="val">${st.exec + st.minExtra} s</span></button>
@@ -594,10 +596,14 @@ function openSetting(key) {
     if (key === 'exec') return `<h2>Durata di una serie</h2><p>Tempo di esecuzione sottratto all'intervallo tra due conferme per calcolare la pausa.</p>${row('exec', st.exec, 's')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
     if (key === 'band') return `<h2>Serie a settimana</h2><p>Fascia di riferimento per distretto: sotto = carente, sopra = alto.</p><span class="lab">Minimo</span>${row('bandMin', st.bandMin, 'serie')}<span class="lab">Massimo</span>${row('bandMax', st.bandMax, 'serie')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
     if (key === 'minPause') return `<h2>Pausa minima valida</h2><p>Se tra due conferme passa meno di questo tempo la pausa è "non attendibile". Predefinito: durata serie + 15 s.</p>${row('minExtra', st.exec + st.minExtra, 's')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
+    if (key === 'rest') return `<h2>Avviso fine pausa</h2><p>Suona un "ding" quando, dopo l'ultima serie, sono passati ${st.exec} s di esecuzione più la pausa scelta. Con il telefono in silenzioso non si sente.</p>
+      <div class="chips"><button class="chip" aria-pressed="${st.ding}" data-act="dingToggle">Suono attivo</button></div>
+      <span class="lab">Pausa</span>${row('rest', mmss(st.rest), 'min')}
+      <button class="btn" data-act="dingTest">Prova suono</button><button class="btn primary" data-act="closeSheet">Fatto</button>`;
     return `<h2>Pausa massima valida</h2><p>Pause più lunghe vengono escluse dalle medie.</p>${row('maxMin', st.maxMin, 'min')}<button class="btn primary" data-act="closeSheet">Fatto</button>`;
   });
 }
-const SET_RULES = { exec: [5, 5, 300], bandMin: [1, 1, 60], bandMax: [1, 1, 80], minExtra: [5, 0, 600], maxMin: [1, 1, 120] };
+const SET_RULES = { rest: [15, 15, 600], exec: [5, 5, 300], bandMin: [1, 1, 60], bandMax: [1, 1, 80], minExtra: [5, 0, 600], maxMin: [1, 1, 120] };
 
 /* Scheda editor */
 function viewScheda(s) {
@@ -675,7 +681,7 @@ function viewSession(s) {
     ${cards || '<div class="empty">Nessuna serie registrata.</div>'}
     <p class="muted" style="margin:0 4px;font-size:13px">Tocca una serie per correggerla o eliminarla.</p>
     ${x === S.active ? '' : `<span class="section-label">Com'è andata?</span>
-    <div class="chips">${MOODS.map(m => `<button class="chip" aria-pressed="${x.mood === m}" data-act="mood" data-arg="${x.id}|${m}">${MOOD_L[m]}</button>`).join('')}</div>
+    <div class="moods">${MOODS.map(m => `<button class="mood-btn ${m}" aria-pressed="${x.mood === m}" data-act="mood" data-arg="${x.id}|${m}" aria-label="${MOOD_L[m]}"></button>`).join('')}</div>
     <button class="btn danger" style="background:transparent;height:44px" data-act="sessDelete" data-arg="${x.id}">Elimina sessione</button>`}`;
 }
 function openEditSet(id) {
@@ -729,7 +735,7 @@ function calendar(weeks) {
       const cls = ts > today.getTime() ? 'fut' : dayCls(days, dayKey(ts)) + (ts === today.getTime() ? ' today' : '');
       cells += `<i class="${cls}"></i>`;
     }
-    cols += `<div class="wk">${cells}</div>`;
+    cols += `<div class="wk" style="--d:${w}">${cells}</div>`;
     const m = new Date(t0 + w * 7 * DAY + 12 * 3600000).getMonth();
     if (m !== prevM) { const left = w / weeks * 100; if (left - lastLeft >= 10) { labels += `<span style="left:${left.toFixed(1)}%">${MONTHS[m]}</span>`; lastLeft = left; } prevM = m; }
   }
@@ -765,7 +771,7 @@ function spark(vals, color) {
   const mn = Math.min(...vals), mx = Math.max(...vals), r = mx - mn || 1;
   const pts = vals.map((v, i) => [2 + i / (vals.length - 1) * 68, 24 - (v - mn) / r * 20]);
   const l = pts[pts.length - 1];
-  return `<svg width="72" height="28" viewBox="0 0 72 28" aria-hidden="true"><polyline points="${pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${l[0]}" cy="${l[1]}" r="3" fill="${color}"/></svg>`;
+  return `<svg class="spark" width="72" height="28" viewBox="0 0 72 28" aria-hidden="true"><polyline pathLength="1" points="${pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${l[0]}" cy="${l[1]}" r="3" fill="${color}"/></svg>`;
 }
 const progToggle = () => `<div class="seg sm" role="radiogroup" aria-label="Metrica" style="display:inline-flex">
   <button role="radio" aria-checked="${V.prog !== 'vol'}" data-act="prog" data-arg="e1">1RM stimato</button>
@@ -910,7 +916,7 @@ function openMood(id) {
     <span class="lab">Carico aumentato (volume)</span>
     <div class="list">${g.map(o => `<div class="set-line"><span class="w">${esc(exById(o.exId).name)}</span><span class="p" style="color:var(--green)">+${fmt(Math.round(o.cur - o.before))} kg</span></div>`).join('') || '<div class="empty">Nessun aumento rispetto alla volta precedente.</div>'}</div>
     <span class="lab">Com'è andata?</span>
-    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">${MOODS.map(m => `<button class="btn" data-act="mood" data-arg="${id}|${m}">${MOOD_L[m]}</button>`).join('')}</div>
+    <div class="moods">${MOODS.map(m => `<button class="mood-btn ${m}" data-act="mood" data-arg="${id}|${m}" aria-label="${MOOD_L[m]}"></button>`).join('')}</div>
     <button class="btn" style="background:transparent;height:44px" data-act="closeSheet">Salta</button>`);
 }
 
@@ -1178,6 +1184,8 @@ const ACT = {
     if (st.bandMin > st.bandMax) { if (k === 'bandMin') st.bandMax = st.bandMin; else st.bandMin = st.bandMax; }
     save(); refreshSheet(); render();
   },
+  dingToggle() { S.settings.ding = !S.settings.ding; if (S.settings.ding) audio(); save(); refreshSheet(); render(); },
+  dingTest() { ding(); },
   dist(m) { V.dist = m; render(); },
   prog(m) { V.prog = m; render(); },
   startTab(m) { V.startTab = m; render(); },
@@ -1310,10 +1318,30 @@ const endDrag = () => {
 document.addEventListener('pointerup', endDrag);
 document.addEventListener('pointercancel', endDrag);
 
+/* Ding a fine pausa */
+let actx = null, dingedFor = null;
+function audio() {
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) { /* no Web Audio */ }
+  return actx;
+}
+function ding() {
+  const c = audio(); if (!c) return;
+  const t = c.currentTime;
+  [[880, 0], [1320, 0.16]].forEach(([f, d]) => {
+    const o = c.createOscillator(), g = c.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.35, t + d + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.9);
+    o.connect(g).connect(c.destination); o.start(t + d); o.stop(t + d + 0.95);
+  });
+}
+// Due once the set's execution time plus the chosen rest has passed; the 5 s window stops a ding when reopening the app much later.
+const restDue = sec => { const st = S.settings, at = st.exec + st.rest; return sec >= at && sec < at + 5; };
+
 /* Aggiornamento in tempo reale (indicatore, cronometro, timer) */
 function tick() {
   const a = A(); if (!a) return;
-  const now = Date.now(), last = restRef();
+  const now = Date.now(), last = restRef(), prev = a.sets[a.sets.length - 1];
+  if (S.settings.ding && prev && prev.id !== dingedFor && restDue((now - prev.ts) / 1000)) { dingedFor = prev.id; ding(); }
   document.querySelectorAll('[data-live]').forEach(el => {
     const k = el.dataset.live;
     if (k === 'since' && last) el.textContent = mmss((now - last.ts) / 1000);
@@ -1361,6 +1389,10 @@ function selftest() {
     eq('aumento volume 60×8 → 62,5×8', volGains(S.sessions[1]).map(o => o.cur - o.before).join(), '20');
     eq('volume totale senza riscaldamento', homeStats().vol, 980);
     if (new Date(noon).getMonth() === new Date().getMonth()) eq('ore del mese (fine sessione)', homeStats().hours >= 1.5, true);
+    S.settings.exec = 30; S.settings.rest = 90;
+    eq('ding non prima di 30 s + pausa', restDue(119), false);
+    eq('ding a 30 s + pausa', restDue(120), true);
+    eq('niente ding riaprendo molto dopo', restDue(600), false);
     eq('dati di prova validi', valid(JSON.parse(JSON.stringify(demoData()))), true);
     const good = JSON.parse(JSON.stringify(real));
     eq('rifiuta umore sconosciuto', valid({ ...good, sessions: [{ id: 'a', name: 'z', start: 1, sets: [], mood: '<b>' }] }), false);
