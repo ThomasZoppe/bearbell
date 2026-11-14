@@ -1,0 +1,9 @@
+# Made by build.py on Netlify
+dist/
+# Local tools
+node_modules/
+.netlify/
+.claude/
+.DS_Store
+# Personal notes
+Prompt Tracker.rtf

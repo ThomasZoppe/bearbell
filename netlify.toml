@@ -1,0 +1,5 @@
+# Netlify builds the site from GitHub: `python3 build.py` makes dist/, the backup API is netlify/functions/backup.mjs at /api/backup.
+[build]
+  command = "python3 build.py"
+  publish = "dist"
+  functions = "netlify/functions"
